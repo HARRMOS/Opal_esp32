@@ -8,10 +8,10 @@
 namespace eyes {
 
 enum class Mood : uint8_t { Neutral, Happy, Sad, Angry, Surprised, Sleepy };
-enum class IrisColor : uint8_t { Hazel, Blue, Brown, Green };
+enum class IrisColor : uint8_t { Opal, Hazel, Blue, Brown, Green };
 
 // Prépare les textures puis lance l'animation : un œil par cœur, en tâche de fond.
-void begin(IrisColor color = IrisColor::Hazel);
+void begin(IrisColor color = IrisColor::Opal);
 
 void setMood(Mood mood);
 void lookAt(float x, float y);  // -1..1 (droite/bas positifs) ; coupe le regard auto

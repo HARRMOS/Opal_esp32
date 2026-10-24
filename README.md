@@ -37,6 +37,9 @@ contents quand Opal parle, tristes en cas d'erreur.
 
 ## Yeux (2 écrans ronds GC9A01)
 
+Iris « opale » irisé (bleu, turquoise, vert, violet, éclats dorés), paupières noir
+mat qui se fondent dans le bord de l'écran, un œil calculé par cœur du processeur.
+
 ![Aperçu des humeurs](docs/eyes_preview.png)
 
 Chaque écran a son propre bus SPI (les deux sont rafraîchis en parallèle en DMA).

@@ -39,7 +39,7 @@ static void handleSerial() {
     case ' ': eyes::lookAt(0, 0); break;
     case 'c': {
       static int color = 0;
-      color = (color + 1) % 4;
+      color = (color + 1) % 5;
       eyes::setIrisColor((eyes::IrisColor)color);
       break;
     }
