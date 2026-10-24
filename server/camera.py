@@ -63,6 +63,7 @@ class CameraHub:
         self._tracker = FaceTracker()
         self._mirror = os.environ.get("OPAL_CAM_MIRROR", "0") == "1"
         self.ws: Any = None
+        self.soft_jpeg = False
         self.frame: bytes | None = None
         self.frame_at = 0.0
         self.new_frame = asyncio.Condition()
@@ -80,8 +81,11 @@ class CameraHub:
         return self.ws is not None
 
     # ── Connexion de la caméra ──
-    async def attach(self, ws: Any) -> None:
+    async def attach(self, ws: Any, hello: dict[str, Any] | None = None) -> None:
         self.ws = ws
+        # Un capteur sans JPEG matériel (GC2145) compresse sur l'ESP32 : au-delà de
+        # 2 à 3 images/s, son WiFi décroche. Un OV2640 tient des cadences plus hautes.
+        self.soft_jpeg = bool((hello or {}).get("soft_jpeg"))
         if not self.present:
             self.present_since = time.time()  # « personne depuis » compte depuis la connexion
         await self.apply_mode()
@@ -98,8 +102,15 @@ class CameraHub:
 
     async def apply_mode(self) -> None:
         """Flux léger pour le suivi ; plus net et plus fluide quand quelqu'un regarde le direct."""
-        mode = {"type": "cam", "fps": 10, "size": "vga"} if self.viewers else {
-            "type": "cam", "fps": 6, "size": "qvga"}
+        if self.soft_jpeg:
+            track = {"type": "cam", "fps": 2, "size": "qvga"}
+            view = {"type": "cam", "fps": 3, "size": "qvga"}
+        else:
+            track = {"type": "cam", "fps": 4, "size": "qvga"}
+            view = {"type": "cam", "fps": 10, "size": "vga"}
+        if fps := os.environ.get("OPAL_CAM_FPS"):  # réglage manuel du suivi
+            track["fps"] = int(fps)
+        mode = view if self.viewers else track
         await self._send(mode)
 
     async def _send(self, payload: dict[str, Any]) -> None:

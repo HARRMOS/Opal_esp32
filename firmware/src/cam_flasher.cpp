@@ -21,6 +21,7 @@ void setup() {
   Serial.begin(115200);
   Serial1.setRxBufferSize(8192);
   Serial1.setTxBufferSize(8192);
+  Serial0.begin(115200);  // port « COM » de la carte (puce USB-série) : copie des messages
   Serial1.begin(115200, SERIAL_8N1, CAM_RX_PIN, CAM_TX_PIN);
   rgbLedWrite(LED_PIN, 0, 0, 30);  // bleu : passerelle prête
 }
@@ -32,9 +33,15 @@ void loop() {
     Serial1.write(buf, n);
     busy = true;
   }
+  while (int n = Serial0.available()) {  // flash possible aussi depuis le port COM
+    n = Serial0.read(buf, min((size_t)n, sizeof(buf)));
+    Serial1.write(buf, n);
+    busy = true;
+  }
   while (int n = Serial1.available()) {
     n = Serial1.read(buf, min((size_t)n, sizeof(buf)));
     Serial.write(buf, n);
+    Serial0.write(buf, n);
     busy = true;
   }
   rgbLedWrite(LED_PIN, 0, busy ? 40 : 0, 30);  // vert pendant les échanges

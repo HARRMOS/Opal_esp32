@@ -238,7 +238,7 @@ class OpalBridge:
         log("device_hello", **{k: v for k, v in hello.items() if k != "type"})
         try:
             if hello.get("device") == "camera":
-                await self._handle_camera(ws)
+                await self._handle_camera(ws, hello)
             else:
                 await self._handle_box(ws)
         except websockets.ConnectionClosed:
@@ -252,8 +252,8 @@ class OpalBridge:
                 reason=ws.close_reason,
             )
 
-    async def _handle_camera(self, ws: ServerConnection) -> None:
-        await self.cams.attach(ws)
+    async def _handle_camera(self, ws: ServerConnection, hello: dict) -> None:
+        await self.cams.attach(ws, hello)
         self._update_node()
         try:
             async for message in ws:

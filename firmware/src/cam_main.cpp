@@ -77,7 +77,7 @@ static bool sendJpeg(uint8_t kind, camera_fb_t* fb) {
   if (fb->format == PIXFORMAT_JPEG) return sendBytes(kind, fb->buf, fb->len);
   uint8_t* jpeg = nullptr;
   size_t len = 0;
-  if (!frame2jpg(fb, kind == 0x02 ? 85 : 70, &jpeg, &len)) return false;
+  if (!frame2jpg(fb, kind == 0x02 ? 85 : 55, &jpeg, &len)) return false;
   bool ok = sendBytes(kind, jpeg, len);
   free(jpeg);
   return ok;
@@ -149,7 +149,8 @@ static void onWsEvent(WStype_t type, uint8_t* payload, size_t length) {
       hello["device"] = "camera";
       hello["sensor"] = sensorName;
       hello["soft_jpeg"] = softJpeg;
-      hello["fw"] = "0.3.0";
+      hello["rssi"] = WiFi.RSSI();  // force du signal WiFi (dBm)
+      hello["fw"] = "0.3.1";
       String out;
       serializeJson(hello, out);
       ws.sendTXT(out);
@@ -241,6 +242,9 @@ void setup() {
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
+  // Pics de courant plus faibles : l'ESP32-CAM décroche du WiFi quand son alimentation
+  // faiblit pendant l'émission (fréquent sur un 3,3 V partagé).
+  WiFi.setTxPower(WIFI_POWER_15dBm);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.printf("WiFi %s", WIFI_SSID);
   while (WiFi.status() != WL_CONNECTED) {
