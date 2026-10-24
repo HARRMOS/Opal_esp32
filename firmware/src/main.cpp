@@ -41,6 +41,10 @@ static volatile bool discardAudio = false;  // ignore la fin d'une réponse inte
 // Expression choisie par Opal (outil opal_box_yeux) : prioritaire sur les états.
 static bool eyesHeld = false;
 static uint32_t eyesHoldUntil = 0;  // 0 = jusqu'à la prochaine prise de parole
+// Caméra (via le pont) : les yeux suivent le visage et s'endorment quand personne n'est là.
+static bool personPresent = true;   // sans caméra, on considère quelqu'un présent
+static uint32_t gazeUntil = 0;
+#define GAZE_HOLD_MS 1200
 static volatile uint32_t spkRate = SPK_DEFAULT_RATE;
 static bool recording = false;
 static uint32_t recordStart = 0;
@@ -73,7 +77,7 @@ static void showEyes() {
       eyes::autoGaze();
       break;
     case State::Idle:
-      eyes::setMood(eyes::Mood::Neutral);
+      eyes::setMood(personPresent ? eyes::Mood::Neutral : eyes::Mood::Sleepy);
       eyes::autoGaze();
       break;
     case State::Listening:  // attentif, regarde en face
@@ -195,6 +199,16 @@ static void onText(const uint8_t* payload, size_t length) {
     discardAudio = false;
   } else if (strcmp(type, "eyes") == 0) {
     applyEyesCommand(doc);
+  } else if (strcmp(type, "gaze") == 0) {
+    // Regarder la personne, sauf si Opal impose une expression ou réfléchit.
+    if (!eyesHeld && state != State::Thinking && state != State::Error) {
+      eyes::lookAt(doc["x"] | 0.f, doc["y"] | 0.f);
+      gazeUntil = millis() + GAZE_HOLD_MS;
+    }
+  } else if (strcmp(type, "presence") == 0) {
+    personPresent = doc["present"] | true;
+    if (personPresent) eyes::blink();  // réveil
+    showEyes();
   } else if (strcmp(type, "error") == 0) {
     Serial.printf("Erreur : %s\n", (const char*)(doc["message"] | ""));
     setState(State::Error);
@@ -336,6 +350,10 @@ void loop() {
   ws.loop();
   handleButton();
   if (eyesHeld && eyesHoldUntil && (int32_t)(millis() - eyesHoldUntil) >= 0) releaseEyes();
+  if (gazeUntil && (int32_t)(millis() - gazeUntil) >= 0) {  // visage perdu : regard libre
+    gazeUntil = 0;
+    showEyes();
+  }
   static uint32_t lastFps = 0;
   if (millis() - lastFps > 30000) {
     lastFps = millis();

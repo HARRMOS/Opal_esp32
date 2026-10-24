@@ -68,6 +68,41 @@ Si l'image est parasitée, passer `EYE_SPI_HZ` à 40 MHz ; si les couleurs sont
 inversées, `EYE_INVERT` à `false` ; si un œil est tourné, `EYE_L/R_ROTATION`
 ([firmware/include/config.h](firmware/include/config.h)).
 
+## Caméra (ESP32-CAM AI-Thinker, OV2640)
+
+La caméra envoie ses images au pont (wss, même jeton que les yeux). Sur le VPS :
+
+- **les yeux te suivent** : détection de visage YuNet, direction envoyée à Opal Box ;
+- **présence** : à ton arrivée les yeux se réveillent, Opal reçoit l'événement
+  `personne_arrivee` et te salue à voix haute (1 fois par heure max) ; sans
+  personne pendant 45 s, `personne_partie` et les yeux s'endorment ;
+- **Opal voit sur demande** : outils `opal_box_photo` (photo 800x600 décrite par
+  Claude Code, ton abonnement) et `opal_box_presence` ;
+- **direct vidéo** : https://iris.inoma.pro/opal/cam (n'importe quel identifiant +
+  le mot de passe `OPAL_VIEWER_PASSWORD` du VPS).
+
+Afficher le mot de passe du direct :
+
+```bash
+ssh ubuntu@51.210.177.60 "grep OPAL_VIEWER_PASSWORD Opal_esp32/deploy/opal-bridge.env"
+```
+
+Flasher (utilise le même `firmware/include/secrets.h`) :
+
+```powershell
+cd firmware
+& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e cam -t upload -t monitor
+```
+
+- Avec le socle **ESP32-CAM-MB** : brancher en USB, lancer la commande ; si
+  « Failed to connect », maintenir **IO0** sur le socle, appuyer sur **RST**, relâcher.
+- Avec un **adaptateur FTDI** (en 5 V) : 5V→5V, GND→GND, TX→U0R, RX→U0T, et **IO0
+  relié à GND** pendant le flash ; retirer ce fil puis appuyer sur RST pour démarrer.
+
+Si les yeux regardent du mauvais côté : `OPAL_CAM_MIRROR=1` dans le fichier du pont
+sur le VPS. Si l'image est à l'envers : `CAM_VFLIP` / `CAM_HMIRROR` dans
+[firmware/src/cam_main.cpp](firmware/src/cam_main.cpp).
+
 ## 1. Le pont sur le VPS (Docker + Traefik)
 
 Le pont (`server/`) ne contient pas de cerveau : il transcrit la voix en local

@@ -1,16 +1,17 @@
-"""Pont WebSocket entre Opal Box (ESP32-S3) et Opal sur le VPS.
+"""Pont WebSocket entre Opal Box (ESP32-S3 + ESP32-CAM) et Opal sur le VPS.
 
 Le pont ne contient pas de cerveau : il transcrit la voix, envoie le texte à
 l'API d'Opal (POST /api/command, la même conversation que sur le PC et le Mac),
 puis renvoie la réponse en voix vers le haut-parleur de l'ESP32.
 
-Tant qu'un boîtier est connecté, le pont se présente aussi à Opal comme un nœud
-(« opal-box », voir node.py) qui lui donne l'outil opal_box_yeux.
+Tant qu'un appareil est connecté, le pont se présente aussi à Opal comme un nœud
+(« opal-box », voir node.py) avec les outils yeux, photo et présence. La caméra
+(camera.py) fait suivre le visage aux yeux et signale arrivées et départs.
 
-Authentification : l'ESP32 envoie « Authorization: Bearer <jeton> » pendant la
-poignée de main ; le jeton attendu est OPAL_DEVICE_TOKEN.
+Authentification : chaque ESP32 envoie « Authorization: Bearer <jeton> » pendant
+la poignée de main ; le jeton attendu est OPAL_DEVICE_TOKEN.
 
-Protocole (un client = un boîtier) :
+Protocole du boîtier (yeux + son) :
 
   ESP32 → VPS
     texte  {"type": "hello", "device": "opal", "mic_rate": 16000}
@@ -26,13 +27,21 @@ Protocole (un client = un boîtier) :
     binaire PCM 16 bits mono 24 kHz       voix d'Opal
     texte  {"type": "audio_end"}
     texte  {"type": "error", "message": "..."}
-    texte  {"type": "eyes", "mood"?, "look"?: [x, y] | "auto", "blink"?, "pupil"?, "hold_ms"}
+    texte  {"type": "eyes", "mood"?, "look"?: [x, y] | "auto", "blink"?, "wink"?, "pupil"?, "hold_ms"}
+    texte  {"type": "gaze", "x", "y"}     visage vu par la caméra (-1..1, vu de face)
+    texte  {"type": "presence", "present": bool}
+
+Protocole de la caméra : voir camera.py ({"type": "hello", "device": "camera"}).
 
 Variables d'environnement :
-    OPAL_DEVICE_TOKEN   jeton partagé avec le firmware (obligatoire)
+    OPAL_DEVICE_TOKEN   jeton partagé avec les firmwares (obligatoire)
     IRIS_URL            API d'Opal (défaut http://iris:8765, réseau Docker)
     IRIS_TOKEN          jeton distant d'Opal, ou IRIS_TOKEN_FILE (défaut /run/secrets/iris_token)
     IRIS_NODE_TOKEN     jeton des nœuds d'Opal, ou IRIS_NODE_TOKEN_FILE (défaut /run/secrets/iris_node_token)
+    OPAL_VIEWER_PASSWORD  mot de passe du direct vidéo (port + 1, /opal/cam)
+    CLAUDE_CODE_OAUTH_TOKEN  abonnement Claude pour décrire les photos (vision.py)
+    OPAL_GREET / OPAL_GREET_COOLDOWN_S   salutation à l'arrivée (défaut 1 / 3600 s)
+    OPAL_CAM_MIRROR     1 si l'image de la caméra est déjà en miroir
     OPAL_STT_MODEL      modèle faster-whisper (défaut small)
     OPAL_TTS_VOICE / OPAL_TTS_RATE / OPAL_TTS_PITCH   voix Edge
 """
@@ -46,6 +55,7 @@ import json
 import os
 import re
 import sys
+import time
 from http import HTTPStatus
 from pathlib import Path
 
@@ -54,15 +64,25 @@ import websockets
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.http11 import Request, Response
 
+from aiohttp import web
+
+import vision
+from camera import CameraHub
 from logs import log
-from node import OpalNode
+from node import OpalNode, eyes_command
 from voice import MIC_RATE, TTS_RATE, Speaker, Transcriber
+from web import make_app
 
 MAX_UTTERANCE_S = 20
 MIN_UTTERANCE_S = 0.3
 AUDIO_CHUNK = 4096  # octets par trame binaire envoyée à l'ESP32
 MAX_SPOKEN_CHARS = 600
 IRIS_TIMEOUT_S = 180
+GAZE_MIN_INTERVAL_S = 0.1
+GREETING_PROMPT = (
+    "[Opal Box] Quelqu'un vient d'apparaître devant ta caméra. "
+    "Salue-le en une phrase courte et naturelle, sans poser de question."
+)
 
 _MARKDOWN = re.compile(r"```[\s\S]*?```|`([^`]*)`|\*\*([^*]+)\*\*|^#{1,6}\s+|^\s*[-•*]\s+", re.M)
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
@@ -114,8 +134,67 @@ class OpalBridge:
         self._stt = stt
         self._tts = tts
         self._token = device_token
-        self._devices: set[ServerConnection] = set()
+        self._devices: set[ServerConnection] = set()  # boîtiers avec yeux / haut-parleur
+        self.cams = CameraHub(self._on_gaze, self._on_presence)
         self.node: OpalNode | None = None
+        self._last_gaze = 0.0
+        self._last_greeting = 0.0
+        self._greet = os.environ.get("OPAL_GREET", "1") == "1"
+        self._greet_cooldown = float(os.environ.get("OPAL_GREET_COOLDOWN_S", "3600"))
+
+    def _update_node(self) -> None:
+        """Le nœud « opal-box » existe pour Opal tant qu'un appareil est en ligne."""
+        if self.node is None:
+            return
+        if self._devices or self.cams.online:
+            self.node.start()
+        else:
+            self.node.stop()
+
+    async def handle_tool(self, tool: str, args: dict[str, object]) -> tuple[bool, str]:
+        """Outils d'Opal Box appelés par Opal (voir node.py)."""
+        if tool == "opal_box_yeux":
+            cmd, summary = eyes_command(args)
+            if not summary:
+                return False, "Aucune expression demandée."
+            sent = await self.send_to_devices(cmd)
+            log("eyes", command=cmd, devices=sent)
+            return (True, f"Yeux : {summary}.") if sent else (False, "Les yeux d'Opal Box ne sont pas connectés.")
+        if tool == "opal_box_photo":
+            question = str(args.get("question") or "Décris ce que tu vois.")
+            jpeg = await self.cams.snapshot(flash=bool(args.get("flash")))
+            log("photo", bytes=len(jpeg), question=question)
+            return True, await vision.describe(jpeg, question)
+        if tool == "opal_box_presence":
+            return True, self.cams.presence_text()
+        return False, f"Outil inconnu : {tool}"
+
+    async def _on_gaze(self, x: float, y: float) -> None:
+        now = time.monotonic()
+        if now - self._last_gaze >= GAZE_MIN_INTERVAL_S:
+            self._last_gaze = now
+            await self.send_to_devices({"type": "gaze", "x": round(x, 3), "y": round(y, 3)})
+
+    async def _on_presence(self, present: bool) -> None:
+        await self.send_to_devices({"type": "presence", "present": present})
+        if self.node is not None:
+            event = "personne_arrivee" if present else "personne_partie"
+            await self.node.send_event(event, {"lieu": "devant Opal Box"})
+        now = time.monotonic()
+        if present and self._greet and self._devices and now - self._last_greeting > self._greet_cooldown:
+            self._last_greeting = now
+            asyncio.create_task(self._greet_visitor())
+
+    async def _greet_visitor(self) -> None:
+        try:
+            answer = await self._iris.ask(GREETING_PROMPT)
+        except Exception as exc:
+            log("greeting_failed", error=str(exc))
+            return
+        log("greeting", text=answer)
+        for ws in list(self._devices):
+            await self._speak(ws, answer)
+            await self._send(ws, type="state", value="idle")
 
     async def send_to_devices(self, payload: dict[str, object]) -> int:
         """Envoie un message à tous les boîtiers connectés ; retourne leur nombre."""
@@ -139,11 +218,43 @@ class OpalBridge:
         return ws.respond(HTTPStatus.UNAUTHORIZED, "Jeton invalide\n")
 
     async def handle(self, ws: ServerConnection) -> None:
+        """Chaque appareil s'annonce d'abord : la caméra, ou le boîtier (yeux + son)."""
         peer = str(ws.remote_address)
         log("device_connected", peer=peer)
+        try:
+            hello = json.loads(await asyncio.wait_for(ws.recv(), 15))
+        except (TimeoutError, ValueError, websockets.ConnectionClosed):
+            return
+        if not isinstance(hello, dict) or hello.get("type") != "hello":
+            return
+        log("device_hello", **{k: v for k, v in hello.items() if k != "type"})
+        try:
+            if hello.get("device") == "camera":
+                await self._handle_camera(ws)
+            else:
+                await self._handle_box(ws)
+        except websockets.ConnectionClosed:
+            pass
+        finally:
+            log("device_disconnected", peer=peer, device=hello.get("device"))
+
+    async def _handle_camera(self, ws: ServerConnection) -> None:
+        await self.cams.attach(ws)
+        self._update_node()
+        try:
+            async for message in ws:
+                if isinstance(message, bytes):
+                    await self.cams.on_binary(message)
+        finally:
+            await self.cams.detach(ws)
+            self._update_node()
+
+    async def _handle_box(self, ws: ServerConnection) -> None:
         self._devices.add(ws)
-        if self.node is not None:
-            self.node.start()
+        self._update_node()
+        await self._send(ws, type="state", value="idle")
+        if self.cams.online:
+            await self._send(ws, type="presence", present=self.cams.present)
         audio = bytearray()
         recording = False
         try:
@@ -155,10 +266,7 @@ class OpalBridge:
 
                 msg = json.loads(message)
                 kind = msg.get("type")
-                if kind == "hello":
-                    log("device_hello", **{k: v for k, v in msg.items() if k != "type"})
-                    await self._send(ws, type="state", value="idle")
-                elif kind == "start":
+                if kind == "start":
                     audio.clear()
                     recording = True
                     await self._send(ws, type="state", value="listening")
@@ -167,13 +275,9 @@ class OpalBridge:
                     pcm = bytes(audio)
                     audio.clear()
                     await self._handle_utterance(ws, pcm)
-        except websockets.ConnectionClosed:
-            pass
         finally:
             self._devices.discard(ws)
-            if not self._devices and self.node is not None:
-                self.node.stop()
-            log("device_disconnected", peer=peer)
+            self._update_node()
 
     async def _handle_utterance(self, ws: ServerConnection, pcm: bytes) -> None:
         if len(pcm) < MIN_UTTERANCE_S * MIC_RATE * 2:
@@ -252,10 +356,19 @@ async def run(host: str, port: int, device_token: str) -> None:
     bridge = OpalBridge(iris, stt, Speaker(), device_token)
     if node_token := iris_node_token():
         node_url = iris_url.replace("http", "ws", 1).rstrip("/") + "/node"
-        bridge.node = OpalNode(node_url, node_token, bridge.send_to_devices)
+        bridge.node = OpalNode(node_url, node_token, bridge.handle_tool)
     else:
-        log("node_disabled", reason="IRIS_NODE_TOKEN absent : pas d'outil yeux pour Opal")
+        log("node_disabled", reason="IRIS_NODE_TOKEN absent : pas d'outils Opal Box pour Opal")
     await stt.warm_up()
+
+    runner: web.AppRunner | None = None
+    if viewer_password := os.environ.get("OPAL_VIEWER_PASSWORD", ""):
+        runner = web.AppRunner(make_app(bridge.cams, viewer_password), access_log=None)
+        await runner.setup()
+        await web.TCPSite(runner, host, port + 1).start()
+        log("camera_web_ready", url=f"http://{host}:{port + 1}/opal/cam")
+    else:
+        log("camera_web_disabled", reason="OPAL_VIEWER_PASSWORD absent")
     try:
         async with serve(
             bridge.handle,
@@ -268,6 +381,8 @@ async def run(host: str, port: int, device_token: str) -> None:
             log("bridge_ready", url=f"ws://{host}:{port}")
             await asyncio.Future()
     finally:
+        if runner is not None:
+            await runner.cleanup()
         await iris.close()
 
 

@@ -1,6 +1,7 @@
 # Pont Opal Box sur le VPS, à côté du conteneur « iris » (réseau Docker « web »).
-# L'ESP32 se connecte à wss://iris.inoma.pro/opal : même domaine et même
+# Les ESP32 se connectent à wss://iris.inoma.pro/opal : même domaine et même
 # certificat qu'Opal, Traefik envoie seulement le chemin /opal vers le pont.
+# Le direct de la caméra est sur https://iris.inoma.pro/opal/cam (mot de passe).
 #
 #   cd ~/Opal_esp32/deploy && docker compose -p opal-box up -d --build
 services:
@@ -9,14 +10,14 @@ services:
     image: opal-bridge:latest
     container_name: opal-bridge
     restart: unless-stopped
-    env_file: opal-bridge.env          # OPAL_DEVICE_TOKEN (chmod 600, non commité)
+    env_file: opal-bridge.env          # jetons et mots de passe (chmod 600, non commité)
     environment:
       IRIS_URL: http://iris:8765
       IRIS_TOKEN_FILE: /run/secrets/iris_token
       IRIS_NODE_TOKEN_FILE: /run/secrets/iris_node_token
     volumes:
       - ${IRIS_DATA_DIR:-/home/ubuntu/Iris/deploy/data}/remote_token:/run/secrets/iris_token:ro
-      # Opal Box se présente à Opal comme un nœud (outil opal_box_yeux)
+      # Opal Box se présente à Opal comme un nœud (outils yeux, photo, présence)
       - ${IRIS_DATA_DIR:-/home/ubuntu/Iris/deploy/data}/node_token:/run/secrets/iris_node_token:ro
       - ./models:/models               # modèle Whisper téléchargé une seule fois
     networks:
@@ -28,7 +29,15 @@ services:
       - traefik.http.routers.opal-box.rule=Host(`${OPAL_DOMAIN:-iris.inoma.pro}`) && PathPrefix(`/opal`)
       - traefik.http.routers.opal-box.tls=true
       - traefik.http.routers.opal-box.tls.certresolver=myresolver
+      - traefik.http.routers.opal-box.service=opal-box
       - traefik.http.services.opal-box.loadbalancer.server.port=8766
+      # Direct vidéo : règle plus longue, donc prioritaire sur /opal
+      - traefik.http.routers.opal-cam.entrypoints=websecure
+      - traefik.http.routers.opal-cam.rule=Host(`${OPAL_DOMAIN:-iris.inoma.pro}`) && PathPrefix(`/opal/cam`)
+      - traefik.http.routers.opal-cam.tls=true
+      - traefik.http.routers.opal-cam.tls.certresolver=myresolver
+      - traefik.http.routers.opal-cam.service=opal-cam
+      - traefik.http.services.opal-cam.loadbalancer.server.port=8767
 
 networks:
   web:
