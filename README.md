@@ -132,6 +132,12 @@ Bon à savoir sur la caméra :
 - Messages de la caméra : à travers la passerelle S3, sur son port USB natif ou sur
   son port COM.
 
+**Photos dans le chat d'Opal** : l'interface web d'Opal affiche les liens
+`/opal/cam/photos/<id>.jpg` comme des images (patch [deploy/iris-chat-photos.patch](deploy/iris-chat-photos.patch),
+appliqué sur le VPS le 2026-10-24). À réappliquer si Opal est redéployé depuis une
+autre copie de son code : `patch -p1 < iris-chat-photos.patch` dans le dossier d'Iris,
+puis `docker compose -p iris up -d --build iris` dans `Iris/deploy`.
+
 ## 1. Le pont sur le VPS (Docker + Traefik)
 
 Le pont (`server/`) ne contient pas de cerveau : il transcrit la voix en local

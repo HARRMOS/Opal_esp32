@@ -1,0 +1,70 @@
+--- a/assistant/api/static/app.js
++++ b/assistant/api/static/app.js
+@@ -96,11 +96,28 @@
+     .replace(/"/g, "&quot;");
+ }
+ 
++// Photos de la caméra d'Opal Box (servies par le pont, même domaine) : affichées dans
++// le message plutôt qu'en simple lien. La ponctuation qui suit l'URL reste du texte.
++const OPAL_PHOTO = /^\/opal\/cam\/photos\/[\w-]+\.jpg$/;
++
++function link(match) {
++  const [, url, tail] = match.match(/^(.*?)([.,;:!?]*)$/);
++  let photo = false;
++  try {
++    const u = new URL(url.replace(/&amp;/g, "&"));
++    photo = u.origin === location.origin && OPAL_PHOTO.test(u.pathname);
++  } catch {}
++  if (photo) {
++    return `<a class="opal-photo" href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="Photo prise par Opal Box" loading="lazy"></a>${tail}`;
++  }
++  return `<a href="${url}" target="_blank" rel="noopener">${url}</a>${tail}`;
++}
++
+ function inline(text) {
+   return esc(text)
+     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+     .replace(/`([^`]+)`/g, "<code>$1</code>")
+-    .replace(/(https?:\/\/[^\s<)]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
++    .replace(/https?:\/\/[^\s<)]+/g, link);
+ }
+ 
+ /** Markdown léger → paragraphes et listes (le texte est toujours échappé). */
+--- a/assistant/api/static/style.css
++++ b/assistant/api/static/style.css
+@@ -1497,3 +1497,16 @@
+     transition-duration: 0.01ms !important;
+   }
+ }
++
++/* Photos de la caméra d'Opal Box dans le fil */
++.msg--iris .opal-photo {
++  display: block;
++  margin: 10px 0 4px;
++  width: fit-content;
++}
++.msg--iris .opal-photo img {
++  display: block;
++  max-width: min(100%, 420px);
++  border-radius: 12px;
++  border: 1px solid var(--line);
++}
+--- a/assistant/api/static/index.html
++++ b/assistant/api/static/index.html
+@@ -18,7 +18,7 @@
+     href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400;500&display=swap"
+     rel="stylesheet"
+   />
+-  <link rel="stylesheet" href="/assets/style.css" />
++  <link rel="stylesheet" href="/assets/style.css?v=opal-box-1" />
+   <script type="importmap">
+     {
+       "imports": {
+@@ -242,6 +242,6 @@
+   </div>
+ 
+   <div class="toast" id="toast" role="status" hidden></div>
+-  <script src="/assets/app.js" type="module"></script>
++  <script src="/assets/app.js?v=opal-box-1" type="module"></script>
+ </body>
+ </html>
