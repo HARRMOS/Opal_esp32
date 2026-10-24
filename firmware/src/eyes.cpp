@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <LovyanGFX.hpp>
 #include <esp_heap_caps.h>
+#include <freertos/semphr.h>
 #include <math.h>
 
 #include "config.h"
@@ -97,6 +98,7 @@ constexpr uint16_t SKIN = rgb(122, 82, 68);
 constexpr uint16_t LASH_UPPER = rgb(24, 14, 14);
 constexpr uint16_t LASH_LOWER = rgb(85, 52, 48);
 constexpr uint16_t SPECULAR = rgb(255, 255, 255);
+constexpr uint16_t TEAR = rgb(232, 168, 160);  // bord humide au-dessus de la paupière du bas
 
 struct Palette {
   float inner[3], mid[3], outer[3], limbus[3];
@@ -115,7 +117,8 @@ const Palette PALETTES[] = {
 uint16_t* sclera;   // SCLERA_W² en PSRAM, glisse avec le regard (le globe tourne)
 uint16_t* irisTex;  // [angle][anneau]
 uint16_t* polar;    // pour chaque pixel autour de l'iris : (distance*2) << 8 | angle
-uint8_t shadeLut[(2 * 121 * 121 >> 5) + 1];  // ombrage sphérique selon r²
+uint8_t shadeLut[(2 * 121 * 121 >> 5) + 1];  // ombrage sphérique selon r², 0..64 (tramé)
+uint8_t spanHalf[H];  // demi-largeur visible de chaque ligne de l'écran rond
 float lidCurve[W];
 uint16_t* strip[2][2];
 
@@ -238,7 +241,11 @@ void buildSclera() {
 void buildShade() {
   for (size_t i = 0; i < sizeof(shadeLut); i++) {
     float r = sqrtf((float)(i << 5)) / 120.f;
-    shadeLut[i] = (uint8_t)constrain(32 * (1 - 0.45f * powf(r, 2.5f)), 8.f, 32.f);
+    shadeLut[i] = (uint8_t)constrain(64 * (1 - 0.45f * powf(r, 2.5f)), 16.f, 64.f);
+  }
+  for (int y = 0; y < H; y++) {
+    int dy = y - CY;
+    spanHalf[y] = (uint8_t)min(CX, (int)sqrtf(max(0, VISIBLE_R2 - dy * dy)));
   }
   for (int x = 0; x < W; x++) {
     float u = (x - CX) / 128.f;
@@ -263,42 +270,70 @@ const Pose MOODS[] = {
     {0.32f, 0.92f, 0.0f, 0.65f},   // Sleepy
 };
 
+// Clignement d'un œil : fermeture rapide, pause, ouverture plus lente qui ralentit.
+struct Blink {
+  bool active = false, wink = false;
+  uint32_t start = 0;
+  uint16_t closeMs = 80, holdMs = 40, openMs = 170;
+};
+
 struct {
   Pose target = MOODS[0], pose = MOODS[0];
   float gx = 0, gy = 0, tgx = 0, tgy = 0;
   bool autoGaze = true;
   uint32_t nextSaccade = 0;
   float pupilOverride = -1, pupil = 0.5f;
-  uint32_t blinkStart = 0, nextBlink = 2000;
-  bool blinking = false, doubleBlink = false;
+  Blink blink[2];
+  uint32_t nextBlink = 2000;
+  bool doubleBlink = false;
+  volatile bool blinkRequest = false;
+  volatile int8_t winkRequest = -1;
   uint32_t lastMs = 0;
 } anim;
 
 struct EyeFrame {
   int icx, icy, sx, sy;
+  int fx, fy;                  // aplatissement de l'iris (8.8) quand l'œil tourne
+  int irisHalfW, irisHalfH;    // étendue de l'iris à l'écran
   int pupil2, ringScale;
-  int16_t upper[W], lower[W];
+  int16_t upper[W], lower[W];  // bords des paupières en 1/16 de pixel
 };
 EyeFrame frame[2];
 
-uint32_t frames = 0, fpsStart = 0;
+uint32_t frames = 0;  // compté par la tâche de l'œil gauche uniquement
+uint32_t fpsStart = 0;
 float fpsValue = 0;
 
 float randRange(float a, float b) { return a + (b - a) * (esp_random() / 4294967295.f); }
 
-float blinkAmount(uint32_t now) {
-  if (!anim.blinking) return 0;
-  uint32_t t = now - anim.blinkStart;
-  if (t < 70) return t / 70.f;          // fermeture rapide
-  if (t < 90) return 1;
-  if (t < 180) return 1 - (t - 90) / 90.f;  // ouverture plus lente
-  anim.blinking = false;
-  if (anim.doubleBlink) {
-    anim.doubleBlink = false;
-    anim.nextBlink = now + 120;
-  } else {
-    anim.nextBlink = now + (uint32_t)randRange(2000, 6500);
+void startBlink(int e, bool wink, uint32_t now) {
+  Blink& b = anim.blink[e];
+  b = Blink{};
+  b.active = true;
+  b.wink = wink;
+  b.start = now;
+  if (wink) {  // clin d'œil : appuyé et tenu un peu plus longtemps
+    b.closeMs = 110;
+    b.holdMs = 260;
+    b.openMs = 200;
   }
+}
+
+float blinkAmount(Blink& b, uint32_t now) {
+  if (!b.active) return 0;
+  uint32_t t = now - b.start;
+  if (t < b.closeMs) {
+    float x = (float)t / b.closeMs;
+    return x * x * (3 - 2 * x);
+  }
+  t -= b.closeMs;
+  if (t < b.holdMs) return 1;
+  t -= b.holdMs;
+  if (t < b.openMs) {
+    float x = 1 - (float)t / b.openMs;
+    return x * x;
+  }
+  b.active = false;
   return 0;
 }
 
@@ -318,10 +353,22 @@ void animate() {
     }
     anim.nextSaccade = now + (uint32_t)randRange(350, 2800);
   }
-  if (!anim.blinking && now >= anim.nextBlink) {
-    anim.blinking = true;
-    anim.blinkStart = now;
-    anim.doubleBlink = randRange(0, 1) < 0.15f;
+
+  bool idle = !anim.blink[0].active && !anim.blink[1].active;
+  if (anim.winkRequest >= 0) {
+    startBlink(anim.winkRequest, true, now);
+    anim.winkRequest = -1;
+  } else if (anim.blinkRequest || (idle && now >= anim.nextBlink)) {
+    anim.blinkRequest = false;
+    startBlink(0, false, now);
+    startBlink(1, false, now);
+    if (anim.doubleBlink) {
+      anim.doubleBlink = false;
+      anim.nextBlink = now + 380;
+    } else {
+      anim.doubleBlink = randRange(0, 1) < 0.15f;
+      anim.nextBlink = now + (uint32_t)randRange(2200, 6500);
+    }
   }
 
   float g = min(1.f, dt * 28);  // saccade ≈ 35 ms
@@ -335,29 +382,42 @@ void animate() {
   pupilTarget += 0.04f * sinf(now * 0.0007f) + 0.02f * sinf(now * 0.0023f);  // hippus
   anim.pupil += (pupilTarget - anim.pupil) * min(1.f, dt * 3);
 
-  float closed = blinkAmount(now);
+  float closed[2] = {blinkAmount(anim.blink[0], now), blinkAmount(anim.blink[1], now)};
   for (int e = 0; e < 2; e++) {
     EyeFrame& f = frame[e];
     float gx = constrain(anim.gx + 0.05f * INNER[e], -1.f, 1.f);  // légère convergence
     float gy = constrain(anim.gy, -1.f, 1.f);
-    f.icx = CX + (int)(gx * GAZE_X_PX);
-    f.icy = CY + (int)(gy * GAZE_Y_PX);
+    f.icx = CX + (int)lroundf(gx * GAZE_X_PX);
+    f.icy = CY + (int)lroundf(gy * GAZE_Y_PX);
     f.sx = SCLERA_PAD + (int)(gx * 30);
     f.sy = SCLERA_PAD + (int)(gy * 26);
+    // Un disque vu de biais s'aplatit : l'iris rétrécit dans le sens du regard.
+    f.fx = (int)(256 / (1 - 0.22f * gx * gx));
+    f.fy = (int)(256 / (1 - 0.22f * gy * gy));
+    f.irisHalfW = IRIS_R * 256 / f.fx + 1;
+    f.irisHalfH = IRIS_R * 256 / f.fy + 1;
     int pr = 16 + (int)(constrain(anim.pupil, 0.f, 1.f) * 30);
     f.pupil2 = pr * 2;
     f.ringScale = (RINGS << 8) / (IRIS_D - f.pupil2);
 
+    // Pendant un clin d'œil, l'autre œil plisse un peu (la joue remonte).
+    int other = 1 - e;
+    float squint = anim.blink[other].wink ? closed[other] * 0.35f : 0;
+    float openL = anim.pose.openL * (1 - squint);
+    float openU = anim.pose.openU * (1 - squint * 0.3f);
     for (int x = 0; x < W; x++) {
       float u = (x - CX) / 128.f;
       float c = lidCurve[x];
-      float lower = LID_CLOSE_Y + anim.pose.openL * LOWER_OPEN_H * c + gy * 10;
-      float upper = LID_CLOSE_Y - anim.pose.openU * UPPER_OPEN_H * c
-                    + anim.pose.tilt * u * INNER[e] * 45 + gy * 18;
+      float lower = LID_CLOSE_Y + openL * LOWER_OPEN_H * c + gy * 10;
+      float upper = LID_CLOSE_Y - openU * UPPER_OPEN_H * c + anim.pose.tilt * u * INNER[e] * 45
+                    + gy * 18;
       upper = min(upper, lower);
-      upper += (lower - upper) * closed;  // clignement : la paupière du haut descend
-      f.upper[x] = (int16_t)upper;
-      f.lower[x] = (int16_t)lower;
+      // Clignement : les paupières se rejoignent un peu sous le milieu (celle du bas remonte).
+      float meet = LID_CLOSE_Y + (lower - LID_CLOSE_Y) * 0.35f;
+      upper += (meet - upper) * closed[e];
+      lower += (meet - lower) * closed[e];
+      f.upper[x] = (int16_t)lroundf(upper * 16);
+      f.lower[x] = (int16_t)lroundf(lower * 16);
     }
   }
 }
@@ -365,62 +425,136 @@ void animate() {
 // ---------------------------------------------------------------------------
 // Rendu
 // ---------------------------------------------------------------------------
+inline uint16_t lidPixel(int depth, bool upper, uint32_t shade) {
+  // depth : pixels entiers entre la ligne et le bord de la paupière
+  if (upper) {
+    if (depth < 3) return LASH_UPPER;
+    if (depth >= 17 && depth < 20) return scale565(SKIN, shade * 26 >> 5);  // pli de la paupière
+    return scale565(SKIN, shade);
+  }
+  return depth < 2 ? LASH_LOWER : scale565(SKIN, shade);
+}
+
 void renderStrip(int e, int y0, uint16_t* out) {
   const EyeFrame& f = frame[e];
   const int hx1 = f.icx - 22, hy1 = f.icy - 24;  // reflets : lumière en haut à gauche
   const int hx2 = f.icx + 16, hy2 = f.icy + 18;
 
   for (int y = y0; y < y0 + STRIP_H; y++) {
-    const int dy = y - CY, dy2 = dy * dy;
-    const uint16_t* scleraRow = sclera + (y + f.sy) * SCLERA_W + f.sx;
-    const int iy = y - f.icy + IRIS_R;
-    const uint16_t* polarRow = (unsigned)iy < IRIS_D ? polar + iy * IRIS_D : nullptr;
     uint16_t* o = out + (y - y0) * W;
+    const int half = spanHalf[y];
+    const int x0 = CX - half, x1 = CX + half;
+    memset(o, 0, x0 * sizeof(uint16_t));
+    memset(o + x1, 0, (W - x1) * sizeof(uint16_t));
 
-    for (int x = 0; x < W; x++) {
-      const int dx = x - CX, r2 = dx * dx + dy2;
-      if (r2 > VISIBLE_R2) {
-        o[x] = 0;
-        continue;
-      }
-      const uint32_t shade = shadeLut[r2 >> 5];
-      const int uy = f.upper[x], ly = f.lower[x];
+    const int dy = y - CY, dy2 = dy * dy;
+    const int y16 = y << 4;
+    const uint16_t* scleraRow = sclera + (y + f.sy) * SCLERA_W + f.sx;
+    const int ry = y - f.icy;
+    const uint16_t* polarRow = nullptr;
+    if (ry > -f.irisHalfH && ry < f.irisHalfH) {
+      const int iy = ((ry * f.fy) >> 8) + IRIS_R;
+      if ((unsigned)iy < IRIS_D) polarRow = polar + iy * IRIS_D;
+    }
+    const int irisX0 = f.icx - f.irisHalfW, irisW = 2 * f.irisHalfW;
+    const int dh1 = y - hy1, dh2 = y - hy2;
+    const int dh1sq = dh1 * dh1, dh2sq = dh2 * dh2;
+    const uint32_t ditherRow = y & 1;
+
+    for (int x = x0; x < x1; x++) {
+      const int dx = x - CX;
+      // Ombrage sur 64 niveaux tramé en damier vers 32 : plus de bandes visibles.
+      const uint32_t shade = (shadeLut[(dx * dx + dy2) >> 5] + (ditherRow ^ (x & 1))) >> 1;
+      const int up = f.upper[x], lo = f.lower[x];
+      const int coverU = up - y16;         // > 0 : la paupière du haut couvre la ligne
+      const int coverL = y16 + 16 - lo;    // > 0 : la paupière du bas couvre la ligne
       uint16_t c;
 
-      if (y < uy) {
-        c = uy - y <= 3 ? LASH_UPPER : scale565(SKIN, shade);
-      } else if (y > ly) {
-        c = y - ly <= 2 ? LASH_LOWER : scale565(SKIN, shade);
+      if (coverU >= 16) {
+        c = lidPixel((coverU - 16) >> 4, true, shade);
+      } else if (coverL >= 16) {
+        c = lidPixel((coverL - 16) >> 4, false, shade);
       } else {
-        const int ix = x - f.icx + IRIS_R;
         bool inIris = false;
-        if (polarRow && (unsigned)ix < IRIS_D) {
-          const uint16_t p = polarRow[ix];
-          const int d2 = p >> 8;
-          if (d2 < IRIS_D) {
-            inIris = true;
-            if (d2 < f.pupil2) {
-              c = PUPIL;
-            } else {
-              int ring = ((d2 - f.pupil2) * f.ringScale) >> 8;
-              c = irisTex[(p & 0xFF) * RINGS + ring];
+        if (polarRow && (unsigned)(x - irisX0) < (unsigned)irisW) {
+          const int ix = (((x - f.icx) * f.fx) >> 8) + IRIS_R;
+          if ((unsigned)ix < IRIS_D) {
+            const uint16_t p = polarRow[ix];
+            const int d2 = p >> 8;
+            if (d2 < IRIS_D) {
+              inIris = true;
+              if (d2 < f.pupil2) {
+                c = PUPIL;
+              } else {
+                const int ring = ((d2 - f.pupil2) * f.ringScale) >> 8;
+                c = irisTex[(p & 0xFF) * RINGS + ring];
+              }
             }
           }
         }
         if (!inIris) c = scleraRow[x];
         c = scale565(c, shade);
 
-        const int dl = y - uy;  // ombre portée de la paupière supérieure
-        if (dl < 14) c = scale565(c, 14 + dl * 18 / 14);
+        const int below = -coverU >> 4;  // ombre portée de la paupière supérieure
+        if (below < 14) c = scale565(c, 14 + max(below, 0) * 18 / 14);
+        const int above = -coverL >> 4;  // ligne humide au ras de la paupière inférieure
+        if (above < 2) c = blend565(c, TEAR, 9);
 
         if (inIris) {
-          int a = x - hx1, b = y - hy1, d = a * a + b * b;
-          if (d < 121) c = blend565(c, SPECULAR, d < 36 ? 28 : (121 - d) * 28 / 85);
-          a = x - hx2, b = y - hy2, d = a * a + b * b;
-          if (d < 16) c = blend565(c, SPECULAR, 16);
+          if (dh1sq < 121) {
+            const int a = x - hx1, d = a * a + dh1sq;
+            if (d < 121) c = blend565(c, SPECULAR, d < 36 ? 28 : (121 - d) * 28 / 85);
+          }
+          if (dh2sq < 16) {
+            const int a = x - hx2;
+            if (a * a + dh2sq < 16) c = blend565(c, SPECULAR, 16);
+          }
         }
+        // Bords des paupières lissés au sous-pixel (mouvements fluides).
+        if (coverU > 0) c = blend565(c, LASH_UPPER, coverU * 2);
+        if (coverL > 0) c = blend565(c, LASH_LOWER, coverL * 2);
       }
       o[x] = (uint16_t)((c >> 8) | (c << 8));  // ordre d'octets de l'écran
+    }
+  }
+}
+
+void drawEye(int e) {
+  lcd[e]->startWrite();
+  int k = 0;
+  for (int y = 0; y < H; y += STRIP_H, k ^= 1) {
+    renderStrip(e, y, strip[e][k]);
+    lcd[e]->waitDMA();
+    lcd[e]->pushImageDMA(0, y, W, STRIP_H, (const lgfx::swap565_t*)strip[e][k]);
+  }
+  lcd[e]->waitDMA();
+  lcd[e]->endWrite();
+}
+
+// Un œil par cœur : l'œil gauche (cœur 0) anime puis lance l'œil droit (cœur 1),
+// les deux se dessinent en même temps, puis on attend l'œil droit avant l'image suivante.
+SemaphoreHandle_t frameStart, frameDone;
+
+void eyeTask(void* arg) {
+  const int e = (int)(intptr_t)arg;
+  for (;;) {
+    if (e == 0) {
+      animate();
+      xSemaphoreGive(frameStart);
+      drawEye(0);
+      xSemaphoreTake(frameDone, portMAX_DELAY);
+      frames++;
+      uint32_t now = millis();
+      if (now - fpsStart >= 1000) {
+        fpsValue = frames * 1000.f / (now - fpsStart);
+        frames = 0;
+        fpsStart = now;
+      }
+      vTaskDelay(1);  // laisse respirer les autres tâches du cœur 0 (WiFi, son)
+    } else {
+      xSemaphoreTake(frameStart, portMAX_DELAY);
+      drawEye(1);
+      xSemaphoreGive(frameDone);
     }
   }
 }
@@ -428,6 +562,7 @@ void renderStrip(int e, int y0, uint16_t* out) {
 }  // namespace
 
 void begin(IrisColor color) {
+  if (polar) return;
   sclera = (uint16_t*)heap_caps_malloc(SCLERA_W * SCLERA_W * 2, MALLOC_CAP_SPIRAM);
   irisTex = (uint16_t*)heap_caps_malloc(ANG * RINGS * 2, MALLOC_CAP_8BIT);
   polar = (uint16_t*)heap_caps_malloc(IRIS_D * IRIS_D * 2, MALLOC_CAP_8BIT);
@@ -435,6 +570,7 @@ void begin(IrisColor color) {
     for (auto& s : eye) s = (uint16_t*)heap_caps_malloc(W * STRIP_H * 2, MALLOC_CAP_DMA);
   if (!sclera || !irisTex || !polar || !strip[1][1]) {
     Serial.println("eyes: mémoire insuffisante");
+    polar = nullptr;
     return;
   }
 
@@ -452,32 +588,11 @@ void begin(IrisColor color) {
     lcd[e]->fillScreen(TFT_BLACK);
   }
   anim.lastMs = fpsStart = millis();
-}
 
-void update() {
-  if (!polar) return;
-  animate();
-  for (int e = 0; e < 2; e++) lcd[e]->startWrite();
-  int k = 0;
-  for (int y = 0; y < H; y += STRIP_H, k ^= 1) {
-    for (int e = 0; e < 2; e++) {
-      renderStrip(e, y, strip[e][k]);
-      lcd[e]->waitDMA();
-      lcd[e]->pushImageDMA(0, y, W, STRIP_H, (const lgfx::swap565_t*)strip[e][k]);
-    }
-  }
-  for (int e = 0; e < 2; e++) {
-    lcd[e]->waitDMA();
-    lcd[e]->endWrite();
-  }
-
-  frames++;
-  uint32_t now = millis();
-  if (now - fpsStart >= 1000) {
-    fpsValue = frames * 1000.f / (now - fpsStart);
-    frames = 0;
-    fpsStart = now;
-  }
+  frameStart = xSemaphoreCreateBinary();
+  frameDone = xSemaphoreCreateBinary();
+  xTaskCreatePinnedToCore(eyeTask, "eye_left", 4096, (void*)0, 1, nullptr, 0);
+  xTaskCreatePinnedToCore(eyeTask, "eye_right", 4096, (void*)1, 1, nullptr, 1);
 }
 
 void setMood(Mood mood) { anim.target = MOODS[(int)mood]; }
@@ -490,9 +605,9 @@ void lookAt(float x, float y) {
 
 void autoGaze() { anim.autoGaze = true; }
 
-void blink() {
-  if (!anim.blinking) anim.nextBlink = 0;
-}
+void blink() { anim.blinkRequest = true; }
+
+void wink(int eye) { anim.winkRequest = (int8_t)constrain(eye, 0, 1); }
 
 void setPupil(float size) { anim.pupilOverride = size; }
 

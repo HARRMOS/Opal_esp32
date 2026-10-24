@@ -52,7 +52,7 @@ EYES_TOOL = {
             "Contrôle les deux yeux (écrans ronds) d'Opal Box, ton boîtier physique posé "
             "devant l'utilisateur. Sert à exprimer une émotion ou à regarder quelque part : "
             "par exemple content quand tu fais une blague, surpris face à une nouvelle, "
-            "cligner pour un clin d'œil. Tous les champs sont facultatifs et combinables. "
+            "clin_d_oeil pour un clin d'œil complice. Tous les champs sont facultatifs et combinables. "
             "Après « duree_s » secondes, les yeux reprennent leur comportement automatique."
         ),
         "parameters": {
@@ -64,7 +64,12 @@ EYES_TOOL = {
                     "enum": [*LOOKS, "libre"],
                     "description": "Direction vue par la personne en face ; « libre » = regard autonome.",
                 },
-                "cligner": {"type": "boolean"},
+                "cligner": {"type": "boolean", "description": "Cligner des deux yeux."},
+                "clin_d_oeil": {
+                    "type": "string",
+                    "enum": ["gauche", "droite"],
+                    "description": "Clin d'œil d'un seul œil (vu par la personne en face).",
+                },
                 "pupille": {"type": "string", "enum": list(PUPILS)},
                 "duree_s": {
                     "type": "number",
@@ -103,6 +108,9 @@ def eyes_command(args: dict[str, Any]) -> tuple[dict[str, Any], str]:
     if args.get("cligner"):
         cmd["blink"] = True
         done.append("clignement")
+    if (wink := args.get("clin_d_oeil")) in ("gauche", "droite"):
+        cmd["wink"] = 0 if wink == "gauche" else 1
+        done.append(f"clin d'œil {wink}")
     if (pupil := args.get("pupille")) in PUPILS:
         cmd["pupil"] = PUPILS[pupil]
         done.append(f"pupilles {pupil}s")

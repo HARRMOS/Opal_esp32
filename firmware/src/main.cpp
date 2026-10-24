@@ -109,7 +109,8 @@ static void releaseEyes() {
   showEyes();
 }
 
-// {"type":"eyes","mood":"happy","look":[x,y]|"auto","blink":true,"pupil":0.1,"hold_ms":8000}
+// {"type":"eyes","mood":"happy","look":[x,y]|"auto","blink":true,"wink":0|1,
+//  "pupil":0.1,"hold_ms":8000}
 static void applyEyesCommand(JsonDocument& doc) {
   static const char* const MOODS[] = {"neutral", "happy", "sad", "angry", "surprised", "sleepy"};
   const char* mood = doc["mood"] | "";
@@ -120,6 +121,7 @@ static void applyEyesCommand(JsonDocument& doc) {
   if (look.is<JsonArrayConst>()) eyes::lookAt(look[0] | 0.f, look[1] | 0.f);
   else if (look.is<const char*>()) eyes::autoGaze();
   if (doc["blink"] | false) eyes::blink();
+  if (!doc["wink"].isNull()) eyes::wink(doc["wink"] | 1);
   if (!doc["pupil"].isNull()) eyes::setPupil(doc["pupil"] | -1.f);
 
   uint32_t hold = doc["hold_ms"] | 8000;
@@ -128,13 +130,6 @@ static void applyEyesCommand(JsonDocument& doc) {
   if (eyesHoldUntil == 0 && hold) eyesHoldUntil = 1;
 }
 
-// Les yeux tournent seuls sur le cœur 0 ; loop() (WiFi, micro) reste sur le cœur 1.
-static void eyesTask(void*) {
-  for (;;) {
-    eyes::update();
-    vTaskDelay(1);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Haut-parleur : tâche dédiée qui vide le tampon PSRAM vers l'I2S
@@ -285,9 +280,8 @@ void setup() {
   pinMode(PTT_PIN, INPUT_PULLUP);
   Serial.printf("\nOpal — PSRAM %lu Ko libre\n", (unsigned long)(ESP.getFreePsram() / 1024));
 
-  eyes::begin();
+  eyes::begin();  // les yeux tournent seuls, un œil par cœur
   setState(State::Connecting);
-  xTaskCreatePinnedToCore(eyesTask, "eyes", 6144, nullptr, 1, nullptr, 0);
 
   spkBuffer = xRingbufferCreateWithCaps(SPK_BUFFER_BYTES, RINGBUF_TYPE_BYTEBUF, MALLOC_CAP_SPIRAM);
   if (!spkBuffer) {
@@ -342,6 +336,11 @@ void loop() {
   ws.loop();
   handleButton();
   if (eyesHeld && eyesHoldUntil && (int32_t)(millis() - eyesHoldUntil) >= 0) releaseEyes();
+  static uint32_t lastFps = 0;
+  if (millis() - lastFps > 30000) {
+    lastFps = millis();
+    Serial.printf("yeux : %.1f fps\n", eyes::fps());
+  }
   if (recording) streamMic();
   else delay(2);
 }

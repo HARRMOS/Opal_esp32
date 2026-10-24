@@ -1,7 +1,7 @@
 // Démo des yeux seuls (env « eyes ») : enchaîne les humeurs, et se pilote
 // depuis le moniteur série :
 //   n neutre   h content   s triste   a fâché   u surpris   z endormi
-//   b cligner  g regard auto   p/P pupille serrée/dilatée   c couleur d'iris
+//   b cligner  k/l clin d'œil gauche/droit  g regard auto   p/P pupille serrée/dilatée   c couleur d'iris
 //   w q x d + espace : regarder haut/gauche/bas/droite, centre
 
 #include <Arduino.h>
@@ -27,6 +27,8 @@ static void handleSerial() {
   }
   switch (ch) {
     case 'b': eyes::blink(); break;
+    case 'k': eyes::wink(0); break;
+    case 'l': eyes::wink(1); break;
     case 'g': eyes::autoGaze(); cycle = true; break;
     case 'p': eyes::setPupil(0.1f); break;
     case 'P': eyes::setPupil(0.95f); break;
@@ -52,8 +54,8 @@ void setup() {
 }
 
 void loop() {
-  eyes::update();
   handleSerial();
+  delay(5);
 
   uint32_t now = millis();
   if (cycle && now >= nextMood) {
