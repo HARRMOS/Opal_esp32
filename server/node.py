@@ -92,7 +92,8 @@ PHOTO_TOOL = {
         "description": (
             "Prend une photo avec la caméra d'Opal Box (ce qui est devant toi, chez "
             "l'utilisateur) et la décrit. À utiliser quand on te demande ce que tu vois, "
-            "qui est là, ou de regarder un objet montré à la caméra."
+            "qui est là, ou de regarder un objet montré à la caméra. Le résultat contient "
+            "aussi un lien vers la photo : donne-le si l'utilisateur veut la voir."
         ),
         "parameters": {
             "type": "object",
@@ -227,7 +228,7 @@ class OpalNode:
         try:
             ok, text = await self._handler(str(msg.get("tool")), msg.get("arguments") or {})
         except Exception as exc:
-            ok, text = False, f"Erreur sur Opal Box : {exc}"
+            ok, text = False, f"Erreur sur Opal Box : {exc or type(exc).__name__}"
         reply.update({"success": True, "output": text} if ok else {"success": False, "error": text})
         try:
             await ws.send(json.dumps(reply, ensure_ascii=False))

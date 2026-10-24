@@ -12,8 +12,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -26,6 +27,7 @@ FRAME, SNAPSHOT = 1, 2
 PRESENCE_ARRIVE_HITS = 3     # visages vus sur les 5 dernières analyses pour « arrivée »
 PRESENCE_LEAVE_S = 45.0      # plus de visage depuis ce délai = « départ »
 GAZE_HOLD_S = 1.2
+MAX_PHOTOS = 50
 
 
 class FaceTracker:
@@ -75,6 +77,7 @@ class CameraHub:
         self.present_since = 0.0
         self.last_face = 0.0
         self._watchdog: asyncio.Task[None] | None = None
+        self.photos: OrderedDict[str, bytes] = OrderedDict()  # photos prises pour Opal
 
     @property
     def online(self) -> bool:
@@ -167,13 +170,33 @@ class CameraHub:
         await self._on_presence(present)
 
     # ── Photo à la demande ──
-    async def snapshot(self, flash: bool = False, timeout: float = 6.0) -> bytes:
+    async def snapshot(self, flash: bool = False, timeout: float = 25.0) -> tuple[bytes, bool]:
+        """Photo haute définition ; à défaut, la dernière image du flux.
+
+        Retourne (jpeg, haute_definition). Avec un capteur sans JPEG matériel, la photo
+        demande de redémarrer la caméra et de compresser une grande image : plusieurs
+        secondes, d'où le délai large.
+        """
         if self.ws is None:
             raise RuntimeError("La caméra d'Opal Box n'est pas connectée.")
         if self._snapshot is None or self._snapshot.done():
             self._snapshot = asyncio.get_running_loop().create_future()
             await self._send({"type": "snapshot", "flash": bool(flash)})
-        return await asyncio.wait_for(asyncio.shield(self._snapshot), timeout)
+        try:
+            return await asyncio.wait_for(asyncio.shield(self._snapshot), timeout), True
+        except (TimeoutError, RuntimeError) as exc:
+            log("snapshot_failed", error=repr(exc))
+            if self.frame is not None and time.time() - self.frame_at < 10:
+                return self.frame, False
+            raise RuntimeError("La caméra n'a pas envoyé de photo à temps.") from exc
+
+    def keep_photo(self, jpeg: bytes) -> str:
+        """Garde la photo (les MAX_PHOTOS dernières) ; retourne son identifiant."""
+        photo_id = secrets.token_urlsafe(9)
+        self.photos[photo_id] = jpeg
+        while len(self.photos) > MAX_PHOTOS:
+            self.photos.popitem(last=False)
+        return photo_id
 
     def presence_text(self) -> str:
         if self.ws is None:

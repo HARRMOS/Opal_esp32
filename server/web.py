@@ -2,11 +2,14 @@
 
 Protégé par mot de passe (authentification HTTP Basic, OPAL_VIEWER_PASSWORD) :
 le navigateur le demande une fois, le flux MJPEG s'affiche dans une simple page.
+Un navigateur déjà appairé à Opal entre directement : son cookie de session
+(iris_session = HMAC du jeton d'Opal) est reconnu, comme le fait Opal lui-même.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 
 from aiohttp import web
@@ -27,9 +30,18 @@ PAGE = """<!doctype html>
 <p>Opal Box · direct</p></body></html>"""
 
 
-def make_app(cams: CameraHub, password: str) -> web.Application:
+def make_app(cams: CameraHub, password: str, iris_token: str = "") -> web.Application:
+    session = (
+        hmac.new(iris_token.encode(), b"iris-session-v1", hashlib.sha256).hexdigest()
+        if iris_token
+        else ""
+    )
+
     @web.middleware
     async def auth(request: web.Request, handler):  # type: ignore[no-untyped-def]
+        cookie = request.cookies.get("iris_session", "")
+        if session and cookie and hmac.compare_digest(cookie, session):
+            return await handler(request)
         header = request.headers.get("Authorization", "")
         if header.startswith("Basic "):
             try:
@@ -51,6 +63,12 @@ def make_app(cams: CameraHub, password: str) -> web.Application:
         if cams.frame is None:
             return web.Response(status=503, text="Caméra hors ligne.")
         return web.Response(body=cams.frame, content_type="image/jpeg")
+
+    async def saved_photo(request: web.Request) -> web.Response:
+        jpeg = cams.photos.get(request.match_info["photo_id"])
+        if jpeg is None:
+            return web.Response(status=404, text="Photo expirée ou introuvable.")
+        return web.Response(body=jpeg, content_type="image/jpeg")
 
     async def stream(request: web.Request) -> web.StreamResponse:
         response = web.StreamResponse(
@@ -88,4 +106,5 @@ def make_app(cams: CameraHub, password: str) -> web.Application:
     app.router.add_get("/opal/cam/", page)
     app.router.add_get("/opal/cam/stream", stream)
     app.router.add_get("/opal/cam/photo.jpg", photo)
+    app.router.add_get("/opal/cam/photos/{photo_id}.jpg", saved_photo)
     return app

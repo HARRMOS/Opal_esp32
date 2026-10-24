@@ -142,6 +142,7 @@ class OpalBridge:
         self._last_gaze = 0.0
         self._last_greeting = 0.0
         self._greet = os.environ.get("OPAL_GREET", "1") == "1"
+        self._public_url = os.environ.get("OPAL_PUBLIC_URL", "https://iris.inoma.pro").rstrip("/")
         self._greet_cooldown = float(os.environ.get("OPAL_GREET_COOLDOWN_S", "3600"))
 
     def _update_node(self) -> None:
@@ -170,9 +171,16 @@ class OpalBridge:
             return (True, f"Yeux : {summary}.") if sent else (False, "Les yeux d'Opal Box ne sont pas connectés.")
         if tool == "opal_box_photo":
             question = str(args.get("question") or "Décris ce que tu vois.")
-            jpeg = await self.cams.snapshot(flash=bool(args.get("flash")))
-            log("photo", bytes=len(jpeg), question=question)
-            return True, await vision.describe(jpeg, question)
+            jpeg, full = await self.cams.snapshot(flash=bool(args.get("flash")))
+            photo_id = self.cams.keep_photo(jpeg)
+            log("photo", bytes=len(jpeg), full=full, id=photo_id)
+            description = await vision.describe(jpeg, question)
+            url = f"{self._public_url}/opal/cam/photos/{photo_id}.jpg"
+            note = "" if full else " (image du flux, la photo haute définition n'est pas arrivée)"
+            return True, (
+                f"{description}\n\nPhoto{note} : {url}\n"
+                "Donne ce lien à l'utilisateur s'il veut voir la photo."
+            )
         if tool == "opal_box_presence":
             return True, self.cams.presence_text()
         return False, f"Outil inconnu : {tool}"
@@ -377,7 +385,7 @@ async def run(host: str, port: int, device_token: str) -> None:
 
     runner: web.AppRunner | None = None
     if viewer_password := os.environ.get("OPAL_VIEWER_PASSWORD", ""):
-        runner = web.AppRunner(make_app(bridge.cams, viewer_password), access_log=None)
+        runner = web.AppRunner(make_app(bridge.cams, viewer_password, iris_token()), access_log=None)
         await runner.setup()
         await web.TCPSite(runner, host, port + 1).start()
         log("camera_web_ready", url=f"http://{host}:{port + 1}/opal/cam")
