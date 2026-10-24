@@ -15,8 +15,12 @@
 static uint8_t buf[512];
 
 void setup() {
+  // Le PC envoie des blocs de plusieurs Ko d'un coup, bien plus vite que les 115200
+  // bauds vers la caméra : sans grands tampons, l'USB de l'S3 perd des octets.
+  Serial.setRxBufferSize(32768);
   Serial.begin(115200);
   Serial1.setRxBufferSize(8192);
+  Serial1.setTxBufferSize(8192);
   Serial1.begin(115200, SERIAL_8N1, CAM_RX_PIN, CAM_TX_PIN);
   rgbLedWrite(LED_PIN, 0, 0, 30);  // bleu : passerelle prête
 }
