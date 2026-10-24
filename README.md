@@ -87,17 +87,31 @@ Afficher le mot de passe du direct :
 ssh ubuntu@51.210.177.60 "grep OPAL_VIEWER_PASSWORD Opal_esp32/deploy/opal-bridge.env"
 ```
 
-Flasher (utilise le même `firmware/include/secrets.h`) :
+Flasher (même `firmware/include/secrets.h`). L'ESP32-CAM n'a pas d'USB : on se sert
+de l'ESP32-S3 comme adaptateur USB-série (aucun achat nécessaire).
 
-```powershell
-cd firmware
-& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e cam -t upload -t monitor
-```
+1. Flasher la passerelle sur l'S3 :
+   `& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e cam-flasher -t upload`
+2. Câbler (fils dupont femelle-femelle), S3 débranché :
 
-- Avec le socle **ESP32-CAM-MB** : brancher en USB, lancer la commande ; si
-  « Failed to connect », maintenir **IO0** sur le socle, appuyer sur **RST**, relâcher.
-- Avec un **adaptateur FTDI** (en 5 V) : 5V→5V, GND→GND, TX→U0R, RX→U0T, et **IO0
-  relié à GND** pendant le flash ; retirer ce fil puis appuyer sur RST pour démarrer.
+   | ESP32-S3 | ESP32-CAM |
+   |---|---|
+   | 5V | 5V |
+   | GND | GND |
+   | GPIO17 | U0R |
+   | GPIO18 | U0T |
+   | — | IO0 relié à GND (le temps du flash) |
+
+3. Rebrancher l'S3 en USB, appuyer sur **RST** au dos de la caméra, puis :
+   `& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e cam -t upload`
+   (environ 2 minutes à 115200 bauds).
+4. Retirer le fil IO0–GND, appuyer sur RST : la caméra démarre ; ses messages
+   passent par l'S3 (`... device monitor -e cam`).
+5. Reflasher l'S3 avec `-e opal-s3`, puis alimenter la caméra seule en 5V
+   (5V + GND, 500 mA minimum).
+
+Avec un socle ESP32-CAM-MB ou un adaptateur FTDI, même principe : IO0 à GND +
+RST avant le flash (le flash ne fait aucun reset automatique).
 
 Si les yeux regardent du mauvais côté : `OPAL_CAM_MIRROR=1` dans le fichier du pont
 sur le VPS. Si l'image est à l'envers : `CAM_VFLIP` / `CAM_HMIRROR` dans
