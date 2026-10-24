@@ -1,0 +1,10 @@
+# PlatformIO
+firmware/.pio/
+firmware/.vscode/
+
+# Identifiants WiFi / serveur
+firmware/include/secrets.h
+
+# Python
+__pycache__/
+*.pyc
