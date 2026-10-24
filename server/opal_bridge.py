@@ -79,6 +79,7 @@ AUDIO_CHUNK = 4096  # octets par trame binaire envoyée à l'ESP32
 MAX_SPOKEN_CHARS = 600
 IRIS_TIMEOUT_S = 180
 GAZE_MIN_INTERVAL_S = 0.1
+NODE_GRACE_S = 30.0
 GREETING_PROMPT = (
     "[Opal Box] Quelqu'un vient d'apparaître devant ta caméra. "
     "Salue-le en une phrase courte et naturelle, sans poser de question."
@@ -137,19 +138,26 @@ class OpalBridge:
         self._devices: set[ServerConnection] = set()  # boîtiers avec yeux / haut-parleur
         self.cams = CameraHub(self._on_gaze, self._on_presence)
         self.node: OpalNode | None = None
+        self._node_stop: asyncio.TimerHandle | None = None
         self._last_gaze = 0.0
         self._last_greeting = 0.0
         self._greet = os.environ.get("OPAL_GREET", "1") == "1"
         self._greet_cooldown = float(os.environ.get("OPAL_GREET_COOLDOWN_S", "3600"))
 
     def _update_node(self) -> None:
-        """Le nœud « opal-box » existe pour Opal tant qu'un appareil est en ligne."""
+        """Le nœud « opal-box » existe pour Opal tant qu'un appareil est en ligne.
+
+        Une coupure brève (reconnexion WiFi) ne le retire pas : on attend NODE_GRACE_S.
+        """
         if self.node is None:
             return
+        if self._node_stop is not None:
+            self._node_stop.cancel()
+            self._node_stop = None
         if self._devices or self.cams.online:
             self.node.start()
         else:
-            self.node.stop()
+            self._node_stop = asyncio.get_running_loop().call_later(NODE_GRACE_S, self.node.stop)
 
     async def handle_tool(self, tool: str, args: dict[str, object]) -> tuple[bool, str]:
         """Outils d'Opal Box appelés par Opal (voir node.py)."""
@@ -236,7 +244,13 @@ class OpalBridge:
         except websockets.ConnectionClosed:
             pass
         finally:
-            log("device_disconnected", peer=peer, device=hello.get("device"))
+            log(
+                "device_disconnected",
+                peer=peer,
+                device=hello.get("device"),
+                code=ws.close_code,
+                reason=ws.close_reason,
+            )
 
     async def _handle_camera(self, ws: ServerConnection) -> None:
         await self.cams.attach(ws)

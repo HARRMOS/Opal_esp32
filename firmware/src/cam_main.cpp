@@ -1,4 +1,6 @@
-// Opal Box — caméra (ESP32-CAM AI-Thinker, OV2640) reliée au pont Opal en wss.
+// Opal Box — caméra (ESP32-CAM AI-Thinker) reliée au pont Opal en wss.
+// Capteur OV2640 (JPEG matériel) ou GC2145 « RHYX M21-45 » (sans JPEG : l'image brute
+// est compressée en JPEG par l'ESP32, un peu plus lentement).
 //
 // Envoie en continu de petites images JPEG (suivi du visage, présence, direct vidéo)
 // et une photo haute définition quand Opal en demande une (outil opal_box_photo).
@@ -6,9 +8,11 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <ArduinoOTA.h>
 #include <WebSocketsClient.h>
 #include <WiFi.h>
 #include <esp_camera.h>
+#include <img_converters.h>
 
 #include "ca_certs.h"
 #include "config.h"
@@ -58,17 +62,46 @@ static uint32_t frameIntervalMs = 1000 / 6;
 static framesize_t streamSize = FRAMESIZE_QVGA;
 static uint32_t lastFrame = 0;
 static bool snapshotRequested = false, snapshotFlash = false;
+static bool softJpeg = false;  // capteur sans JPEG matériel (GC2145)
+static const char* sensorName = "?";
+static camera_config_t camConfig = {};
 
-static bool sendJpeg(uint8_t kind, const camera_fb_t* fb) {
-  if (fb->len + 1 > txCapacity) return false;
+static bool sendBytes(uint8_t kind, const uint8_t* jpeg, size_t len) {
+  if (len + 1 > txCapacity) return false;
   txBuffer[0] = kind;
-  memcpy(txBuffer + 1, fb->buf, fb->len);
-  return ws.sendBIN(txBuffer, fb->len + 1);
+  memcpy(txBuffer + 1, jpeg, len);
+  return ws.sendBIN(txBuffer, len + 1);
+}
+
+static bool sendJpeg(uint8_t kind, camera_fb_t* fb) {
+  if (fb->format == PIXFORMAT_JPEG) return sendBytes(kind, fb->buf, fb->len);
+  uint8_t* jpeg = nullptr;
+  size_t len = 0;
+  if (!frame2jpg(fb, kind == 0x02 ? 85 : 70, &jpeg, &len)) return false;
+  bool ok = sendBytes(kind, jpeg, len);
+  free(jpeg);
+  return ok;
+}
+
+static void applyOrientation() {
+  sensor_t* s = esp_camera_sensor_get();
+  if (!s) return;
+  s->set_vflip(s, CAM_VFLIP);
+  s->set_hmirror(s, CAM_HMIRROR);
 }
 
 static void setFrameSize(framesize_t size) {
-  sensor_t* s = esp_camera_sensor_get();
-  if (s) s->set_framesize(s, size);
+  if (!softJpeg) {  // en JPEG, le pilote change de taille à la volée
+    sensor_t* s = esp_camera_sensor_get();
+    if (s) s->set_framesize(s, size);
+    return;
+  }
+  // En image brute, les tampons ont la taille exacte d'une image : on redémarre la caméra.
+  if (camConfig.frame_size == size) return;
+  esp_camera_deinit();
+  camConfig.frame_size = size;
+  if (esp_camera_init(&camConfig) != ESP_OK) Serial.println("Changement de taille impossible");
+  applyOrientation();
 }
 
 // Photo pour Opal : SVGA (800x600), quelques images jetées le temps que l'exposition s'adapte.
@@ -83,7 +116,8 @@ static void takeSnapshot() {
   camera_fb_t* fb = esp_camera_fb_get();
   digitalWrite(FLASH_LED, LOW);
   if (fb) {
-    Serial.printf("Photo %u octets -> %s\n", fb->len, sendJpeg(0x02, fb) ? "envoyée" : "échec");
+    Serial.printf("Photo %ux%u -> %s\n", fb->width, fb->height,
+                  sendJpeg(0x02, fb) ? "envoyée" : "échec");
     esp_camera_fb_return(fb);
   }
   setFrameSize(streamSize);
@@ -110,11 +144,22 @@ static void onWsEvent(WStype_t type, uint8_t* payload, size_t length) {
     case WStype_CONNECTED: {
       Serial.println("Connecté au pont Opal");
       digitalWrite(STATUS_LED, LOW);
-      ws.sendTXT("{\"type\":\"hello\",\"device\":\"camera\",\"model\":\"ov2640\",\"fw\":\"0.1.0\"}");
+      JsonDocument hello;
+      hello["type"] = "hello";
+      hello["device"] = "camera";
+      hello["sensor"] = sensorName;
+      hello["soft_jpeg"] = softJpeg;
+      hello["fw"] = "0.3.0";
+      String out;
+      serializeJson(hello, out);
+      ws.sendTXT(out);
       break;
     }
     case WStype_DISCONNECTED:
       digitalWrite(STATUS_LED, HIGH);
+      Serial.printf("Pont déconnecté (RAM interne libre %u, plus grand bloc %u)\n",
+                    heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                    heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
       break;
     case WStype_TEXT:
       onText(payload, length);
@@ -152,11 +197,27 @@ static bool initCamera() {
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.grab_mode = CAMERA_GRAB_LATEST;
 
-  if (esp_camera_init(&config) != ESP_OK) return false;
+  if (esp_camera_init(&config) != ESP_OK) {
+    // Capteur sans JPEG matériel (GC2145…) : image brute RGB565, compressée par l'ESP32.
+    // Tampons à la taille exacte du flux ; la photo redémarre la caméra en SVGA.
+    esp_camera_deinit();
+    config.pixel_format = PIXFORMAT_RGB565;
+    config.frame_size = streamSize;
+    if (esp_camera_init(&config) != ESP_OK) return false;
+    softJpeg = true;
+  }
+  camConfig = config;
   sensor_t* s = esp_camera_sensor_get();
-  s->set_vflip(s, CAM_VFLIP);
-  s->set_hmirror(s, CAM_HMIRROR);
-  s->set_framesize(s, streamSize);
+  switch (s->id.PID) {
+    case OV2640_PID: sensorName = "ov2640"; break;
+    case OV3660_PID: sensorName = "ov3660"; break;
+    case GC2145_PID: sensorName = "gc2145"; break;
+    default: sensorName = "autre"; break;
+  }
+  Serial.printf("Capteur %s (PID 0x%04x)%s\n", sensorName, s->id.PID,
+                softJpeg ? ", JPEG logiciel" : "");
+  applyOrientation();
+  if (!softJpeg) s->set_framesize(s, streamSize);
   return true;
 }
 
@@ -169,7 +230,7 @@ void setup() {
   Serial.printf("\nOpal Box caméra — PSRAM %lu Ko\n", (unsigned long)(ESP.getFreePsram() / 1024));
 
   if (!initCamera()) {
-    Serial.println("Caméra introuvable : vérifie la nappe de l'OV2640");
+    Serial.println("Caméra introuvable : vérifie la nappe du capteur");
     while (true) {
       digitalWrite(STATUS_LED, !digitalRead(STATUS_LED));
       delay(200);
@@ -205,9 +266,19 @@ void setup() {
   ws.onEvent(onWsEvent);
   ws.setReconnectInterval(3000);
   ws.enableHeartbeat(15000, 3000, 2);
+
+  // Mises à jour par WiFi (env cam-ota) : plus besoin de la passerelle ni du fil IO0.
+  ArduinoOTA.setHostname("opal-cam");
+  ArduinoOTA.setPassword(OPAL_DEVICE_TOKEN);
+  ArduinoOTA.onStart([] {
+    Serial.println("Mise à jour par WiFi...");
+    ws.disconnect();
+  });
+  ArduinoOTA.begin();
 }
 
 void loop() {
+  ArduinoOTA.handle();
   ws.loop();
   if (!ws.isConnected()) {
     delay(10);
