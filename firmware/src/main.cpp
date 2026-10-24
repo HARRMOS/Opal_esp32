@@ -38,6 +38,9 @@ static RingbufHandle_t spkBuffer;
 
 static volatile State state = State::Connecting;
 static volatile bool discardAudio = false;  // ignore la fin d'une réponse interrompue
+// Expression choisie par Opal (outil opal_box_yeux) : prioritaire sur les états.
+static bool eyesHeld = false;
+static uint32_t eyesHoldUntil = 0;  // 0 = jusqu'à la prochaine prise de parole
 static volatile uint32_t spkRate = SPK_DEFAULT_RATE;
 static bool recording = false;
 static uint32_t recordStart = 0;
@@ -63,6 +66,7 @@ static void showState() {
 
 // Expression des yeux pour chaque état d'Opal.
 static void showEyes() {
+  if (eyesHeld) return;
   switch (state) {
     case State::Connecting:
       eyes::setMood(eyes::Mood::Sleepy);
@@ -96,6 +100,32 @@ static void setState(State s) {
   state = s;
   showState();
   showEyes();
+}
+
+static void releaseEyes() {
+  if (!eyesHeld) return;
+  eyesHeld = false;
+  eyes::setPupil(-1);
+  showEyes();
+}
+
+// {"type":"eyes","mood":"happy","look":[x,y]|"auto","blink":true,"pupil":0.1,"hold_ms":8000}
+static void applyEyesCommand(JsonDocument& doc) {
+  static const char* const MOODS[] = {"neutral", "happy", "sad", "angry", "surprised", "sleepy"};
+  const char* mood = doc["mood"] | "";
+  for (int i = 0; i < 6; i++) {
+    if (strcmp(mood, MOODS[i]) == 0) eyes::setMood((eyes::Mood)i);
+  }
+  JsonVariant look = doc["look"];
+  if (look.is<JsonArrayConst>()) eyes::lookAt(look[0] | 0.f, look[1] | 0.f);
+  else if (look.is<const char*>()) eyes::autoGaze();
+  if (doc["blink"] | false) eyes::blink();
+  if (!doc["pupil"].isNull()) eyes::setPupil(doc["pupil"] | -1.f);
+
+  uint32_t hold = doc["hold_ms"] | 8000;
+  eyesHeld = true;
+  eyesHoldUntil = hold ? millis() + hold : 0;
+  if (eyesHoldUntil == 0 && hold) eyesHoldUntil = 1;
 }
 
 // Les yeux tournent seuls sur le cœur 0 ; loop() (WiFi, micro) reste sur le cœur 1.
@@ -168,6 +198,8 @@ static void onText(const uint8_t* payload, size_t length) {
     spkRate = doc["rate"] | SPK_DEFAULT_RATE;
   } else if (strcmp(type, "audio_end") == 0) {
     discardAudio = false;
+  } else if (strcmp(type, "eyes") == 0) {
+    applyEyesCommand(doc);
   } else if (strcmp(type, "error") == 0) {
     Serial.printf("Erreur : %s\n", (const char*)(doc["message"] | ""));
     setState(State::Error);
@@ -211,6 +243,7 @@ static void startRecording() {
   }
   recording = true;
   recordStart = millis();
+  releaseEyes();
   sendJson("start");
   setState(State::Listening);
 }
@@ -308,6 +341,7 @@ void setup() {
 void loop() {
   ws.loop();
   handleButton();
+  if (eyesHeld && eyesHoldUntil && (int32_t)(millis() - eyesHoldUntil) >= 0) releaseEyes();
   if (recording) streamMic();
   else delay(2);
 }

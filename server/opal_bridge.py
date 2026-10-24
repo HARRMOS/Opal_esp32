@@ -4,6 +4,9 @@ Le pont ne contient pas de cerveau : il transcrit la voix, envoie le texte à
 l'API d'Opal (POST /api/command, la même conversation que sur le PC et le Mac),
 puis renvoie la réponse en voix vers le haut-parleur de l'ESP32.
 
+Tant qu'un boîtier est connecté, le pont se présente aussi à Opal comme un nœud
+(« opal-box », voir node.py) qui lui donne l'outil opal_box_yeux.
+
 Authentification : l'ESP32 envoie « Authorization: Bearer <jeton> » pendant la
 poignée de main ; le jeton attendu est OPAL_DEVICE_TOKEN.
 
@@ -23,11 +26,13 @@ Protocole (un client = un boîtier) :
     binaire PCM 16 bits mono 24 kHz       voix d'Opal
     texte  {"type": "audio_end"}
     texte  {"type": "error", "message": "..."}
+    texte  {"type": "eyes", "mood"?, "look"?: [x, y] | "auto", "blink"?, "pupil"?, "hold_ms"}
 
 Variables d'environnement :
     OPAL_DEVICE_TOKEN   jeton partagé avec le firmware (obligatoire)
     IRIS_URL            API d'Opal (défaut http://iris:8765, réseau Docker)
     IRIS_TOKEN          jeton distant d'Opal, ou IRIS_TOKEN_FILE (défaut /run/secrets/iris_token)
+    IRIS_NODE_TOKEN     jeton des nœuds d'Opal, ou IRIS_NODE_TOKEN_FILE (défaut /run/secrets/iris_node_token)
     OPAL_STT_MODEL      modèle faster-whisper (défaut small)
     OPAL_TTS_VOICE / OPAL_TTS_RATE / OPAL_TTS_PITCH   voix Edge
 """
@@ -50,6 +55,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.http11 import Request, Response
 
 from logs import log
+from node import OpalNode
 from voice import MIC_RATE, TTS_RATE, Speaker, Transcriber
 
 MAX_UTTERANCE_S = 20
@@ -108,6 +114,20 @@ class OpalBridge:
         self._stt = stt
         self._tts = tts
         self._token = device_token
+        self._devices: set[ServerConnection] = set()
+        self.node: OpalNode | None = None
+
+    async def send_to_devices(self, payload: dict[str, object]) -> int:
+        """Envoie un message à tous les boîtiers connectés ; retourne leur nombre."""
+        message = json.dumps(payload, ensure_ascii=False)
+        sent = 0
+        for ws in list(self._devices):
+            try:
+                await ws.send(message)
+                sent += 1
+            except websockets.ConnectionClosed:
+                pass
+        return sent
 
     def check_auth(self, ws: ServerConnection, request: Request) -> Response | None:
         """Refuse la poignée de main si le jeton est absent ou faux."""
@@ -121,6 +141,9 @@ class OpalBridge:
     async def handle(self, ws: ServerConnection) -> None:
         peer = str(ws.remote_address)
         log("device_connected", peer=peer)
+        self._devices.add(ws)
+        if self.node is not None:
+            self.node.start()
         audio = bytearray()
         recording = False
         try:
@@ -147,6 +170,9 @@ class OpalBridge:
         except websockets.ConnectionClosed:
             pass
         finally:
+            self._devices.discard(ws)
+            if not self._devices and self.node is not None:
+                self.node.stop()
             log("device_disconnected", peer=peer)
 
     async def _handle_utterance(self, ws: ServerConnection, pcm: bytes) -> None:
@@ -202,18 +228,33 @@ class OpalBridge:
         await ws.send(json.dumps(payload, ensure_ascii=False))
 
 
-def iris_token() -> str:
-    token = os.environ.get("IRIS_TOKEN", "").strip()
-    if token:
-        return token
-    path = Path(os.environ.get("IRIS_TOKEN_FILE", "/run/secrets/iris_token"))
+def secret(name: str, default_file: str) -> str:
+    """Valeur de la variable `name`, sinon contenu du fichier `name`_FILE."""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    path = Path(os.environ.get(f"{name}_FILE", default_file))
     return path.read_text(encoding="utf-8").strip() if path.is_file() else ""
 
 
+def iris_token() -> str:
+    return secret("IRIS_TOKEN", "/run/secrets/iris_token")
+
+
+def iris_node_token() -> str:
+    return secret("IRIS_NODE_TOKEN", "/run/secrets/iris_node_token")
+
+
 async def run(host: str, port: int, device_token: str) -> None:
-    iris = IrisClient(os.environ.get("IRIS_URL", "http://iris:8765"), iris_token())
+    iris_url = os.environ.get("IRIS_URL", "http://iris:8765")
+    iris = IrisClient(iris_url, iris_token())
     stt = Transcriber()
     bridge = OpalBridge(iris, stt, Speaker(), device_token)
+    if node_token := iris_node_token():
+        node_url = iris_url.replace("http", "ws", 1).rstrip("/") + "/node"
+        bridge.node = OpalNode(node_url, node_token, bridge.send_to_devices)
+    else:
+        log("node_disabled", reason="IRIS_NODE_TOKEN absent : pas d'outil yeux pour Opal")
     await stt.warm_up()
     try:
         async with serve(

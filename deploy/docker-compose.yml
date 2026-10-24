@@ -13,8 +13,11 @@ services:
     environment:
       IRIS_URL: http://iris:8765
       IRIS_TOKEN_FILE: /run/secrets/iris_token
+      IRIS_NODE_TOKEN_FILE: /run/secrets/iris_node_token
     volumes:
       - ${IRIS_DATA_DIR:-/home/ubuntu/Iris/deploy/data}/remote_token:/run/secrets/iris_token:ro
+      # Opal Box se présente à Opal comme un nœud (outil opal_box_yeux)
+      - ${IRIS_DATA_DIR:-/home/ubuntu/Iris/deploy/data}/node_token:/run/secrets/iris_node_token:ro
       - ./models:/models               # modèle Whisper téléchargé une seule fois
     networks:
       - web

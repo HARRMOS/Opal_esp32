@@ -77,6 +77,12 @@ L'ESP32 s'y connecte en `wss://iris.inoma.pro/opal` : Traefik envoie le chemin
 protégé par un jeton (`Authorization: Bearer`), stocké sur le VPS dans
 `~/Opal_esp32/deploy/opal-bridge.env` et dans `firmware/include/secrets.h`.
 
+Tant qu'Opal Box est connectée, le pont se présente aussi à Opal comme un
+nœud « opal-box » (comme le PC et le Mac, voir [server/node.py](server/node.py)).
+Opal gagne l'outil `opal_box_yeux` : humeur, regard, clignement, pupilles,
+pendant `duree_s` secondes, puis les yeux reprennent leur comportement auto.
+Exemple à dire ou écrire à Opal : « fais-moi un clin d'œil avec un air content ».
+
 Mettre à jour le pont après une modification de `server/` :
 
 ```bash
