@@ -10,6 +10,7 @@
 #include <WiFi.h>
 #include <freertos/ringbuf.h>
 
+#include "ca_certs.h"
 #include "config.h"
 #include "eyes.h"
 #if __has_include("secrets.h")
@@ -17,6 +18,15 @@
 #else
 #warning "include/secrets.h absent : copie secrets.example.h en secrets.h"
 #include "secrets.example.h"
+#endif
+#ifndef OPAL_USE_TLS
+#define OPAL_USE_TLS 1
+#endif
+#ifndef OPAL_SERVER_PORT
+#define OPAL_SERVER_PORT (OPAL_USE_TLS ? 443 : 8765)
+#endif
+#ifndef OPAL_DEVICE_TOKEN
+#error "Ajoute #define OPAL_DEVICE_TOKEN \"...\" dans include/secrets.h (voir secrets.example.h)"
 #endif
 
 enum class State { Connecting, Idle, Listening, Thinking, Speaking, Error };
@@ -272,10 +282,24 @@ void setup() {
     delay(300);
     Serial.print('.');
   }
-  Serial.printf("\nIP %s -> pont ws://%s:%d\n", WiFi.localIP().toString().c_str(),
-                OPAL_SERVER_HOST, OPAL_SERVER_PORT);
+  Serial.printf("\nIP %s -> pont %s://%s:%d%s\n", WiFi.localIP().toString().c_str(),
+                OPAL_USE_TLS ? "wss" : "ws", OPAL_SERVER_HOST, OPAL_SERVER_PORT,
+                OPAL_SERVER_PATH);
 
+#if OPAL_USE_TLS
+  // Le certificat du VPS n'est vérifiable qu'avec l'heure exacte.
+  configTime(0, 0, "pool.ntp.org", "time.google.com");
+  Serial.print("Heure NTP");
+  while (time(nullptr) < 1700000000) {
+    delay(300);
+    Serial.print('.');
+  }
+  Serial.println(" ok");
+  ws.beginSslWithCA(OPAL_SERVER_HOST, OPAL_SERVER_PORT, OPAL_SERVER_PATH, OPAL_ROOT_CA);
+#else
   ws.begin(OPAL_SERVER_HOST, OPAL_SERVER_PORT, OPAL_SERVER_PATH);
+#endif
+  ws.setExtraHeaders("Authorization: Bearer " OPAL_DEVICE_TOKEN);
   ws.onEvent(onWsEvent);
   ws.setReconnectInterval(2000);
   ws.enableHeartbeat(15000, 3000, 2);

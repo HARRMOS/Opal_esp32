@@ -8,3 +8,6 @@ firmware/include/secrets.h
 # Python
 __pycache__/
 *.pyc
+
+# Jeton du pont sur le VPS
+deploy/opal-bridge.env

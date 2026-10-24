@@ -1,5 +1,9 @@
 """Pont WebSocket entre Opal (ESP32-S3) et le cerveau Iris.
 
+Authentification : l'ESP32 envoie l'en-tête « Authorization: Bearer <jeton> »
+pendant la poignée de main ; le jeton attendu vient de OPAL_DEVICE_TOKEN
+(ou --token). Sur le VPS, le pont écoute en local derrière Caddy (wss://).
+
 Protocole (un client = un boîtier Opal) :
 
   ESP32 → PC
@@ -18,13 +22,15 @@ Protocole (un client = un boîtier Opal) :
     texte  {"type": "error", "message": "..."}
 
 Lancement (depuis le venv d'Iris, avec le .env d'Iris) :
-    python server/opal_bridge.py --iris-dir ../Iris
+    OPAL_DEVICE_TOKEN=... python server/opal_bridge.py --iris-dir ../Iris
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
+from http import HTTPStatus
 import json
 import os
 import sys
@@ -35,6 +41,7 @@ from uuid import uuid4
 
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.http11 import Request, Response
 
 from assistant.brain import Brain, create_llm_client
 from assistant.browser import close_browser_manager
@@ -60,13 +67,23 @@ AUDIO_CHUNK = 4096  # octets par trame binaire envoyée à l'ESP32
 
 
 class OpalBridge:
-    def __init__(self, brain: Brain, tts: PcmSpeechEngine) -> None:
+    def __init__(self, brain: Brain, tts: PcmSpeechEngine, token: str) -> None:
         self._brain = brain
         self._tts = tts
+        self._token = token
         self._voice = create_voice_service()
         self._settings = get_settings()
         # Le cerveau garde un historique unique : une requête à la fois.
         self._lock = asyncio.Lock()
+
+    def check_auth(self, ws: ServerConnection, request: Request) -> Response | None:
+        """Refuse la poignée de main si le jeton est absent ou faux."""
+        header = request.headers.get("Authorization", "")
+        given = header.removeprefix("Bearer ").strip()
+        if hmac.compare_digest(given.encode(), self._token.encode()):
+            return None
+        logger.warning("opal_auth_refused", peer=str(ws.remote_address))
+        return ws.respond(HTTPStatus.UNAUTHORIZED, "Jeton invalide\n")
 
     async def handle(self, ws: ServerConnection) -> None:
         peer = ws.remote_address
@@ -165,7 +182,7 @@ class OpalBridge:
         await ws.send(json.dumps(payload, ensure_ascii=False))
 
 
-async def run(host: str, port: int) -> None:
+async def run(host: str, port: int, token: str) -> None:
     settings = get_settings()
     setup_logging(settings)
 
@@ -176,10 +193,17 @@ async def run(host: str, port: int) -> None:
 
     async with create_llm_client(settings) as llm:
         await register_all_tools_async(ctx, settings, memory, ctx.session_id, llm=llm)
-        bridge = OpalBridge(Brain(ctx, llm), tts)
+        bridge = OpalBridge(Brain(ctx, llm), tts, token)
         await bridge._voice.warm_up_stt()
         try:
-            async with serve(bridge.handle, host, port, max_size=None, ping_interval=20):
+            async with serve(
+                bridge.handle,
+                host,
+                port,
+                process_request=bridge.check_auth,
+                max_size=None,
+                ping_interval=20,
+            ):
                 print(f"  Opal bridge prêt sur ws://{host}:{port}  (Ctrl+C pour quitter)")
                 await asyncio.Future()
         finally:
@@ -191,7 +215,11 @@ async def run(host: str, port: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Pont WebSocket Opal ESP32 ↔ Iris")
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="127.0.0.1 derrière Caddy (VPS) ; 0.0.0.0 pour un usage direct en réseau local",
+    )
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
         "--iris-dir",
@@ -199,11 +227,17 @@ def main() -> None:
         default=Path(__file__).resolve().parents[2] / "Iris",
         help="Dossier d'Iris (pour charger son .env et ses données)",
     )
+    parser.add_argument("--token", default=os.environ.get("OPAL_DEVICE_TOKEN", ""))
     args = parser.parse_args()
+    if len(args.token) < 16:
+        sys.exit(
+            "OPAL_DEVICE_TOKEN manquant ou trop court (16 caractères min). Génère-en un :\n"
+            "  python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+        )
     # Iris lit son .env et data/ relativement au dossier courant.
     os.chdir(args.iris_dir)
     try:
-        asyncio.run(run(args.host, args.port))
+        asyncio.run(run(args.host, args.port, args.token))
     except KeyboardInterrupt:
         pass
 

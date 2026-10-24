@@ -52,7 +52,6 @@
 #define SPK_BUFFER_BYTES (2 * 1024 * 1024)  // ~43 s à 24 kHz, en PSRAM
 
 // ---------------------------------------------------------------------------
-// Serveur (pont Iris) — WiFi et IP dans secrets.h
+// Serveur (pont Opal) — WiFi, domaine, port et jeton dans secrets.h
 // ---------------------------------------------------------------------------
-#define OPAL_SERVER_PORT 8765
-#define OPAL_SERVER_PATH "/"
+#define OPAL_SERVER_PATH "/opal"

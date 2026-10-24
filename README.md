@@ -1,10 +1,10 @@
 # Opal — le corps matériel d'Iris
 
 Opal est un boîtier vocal ESP32-S3 : tu maintiens le bouton, tu parles, Iris
-(qui tourne sur le PC) te répond par le haut-parleur.
+(qui tourne sur le VPS) te répond par le haut-parleur.
 
 ```
- [INMP441] --I2S--> ESP32-S3 --WiFi/WebSocket--> server/opal_bridge.py --> Iris (Brain)
+ [INMP441] --I2S--> ESP32-S3 --wss + jeton--> Traefik (VPS) --> opal_bridge --> Opal (Brain)
  [MAX98357A] <--I2S--   (N16R8)     <--- PCM 24 kHz ---   STT local + TTS PCM
 ```
 
@@ -65,35 +65,40 @@ Si l'image est parasitée, passer `EYE_SPI_HZ` à 40 MHz ; si les couleurs sont
 inversées, `EYE_INVERT` à `false` ; si un œil est tourné, `EYE_L/R_ROTATION`
 ([firmware/include/config.h](firmware/include/config.h)).
 
-## 1. Lancer le pont sur le PC
+## 1. Le pont sur le VPS (Docker + Traefik)
 
-Le pont utilise le venv et le `.env` d'Iris (`C:\Users\harrm\Documents\Iris`) :
+Le pont tourne sur le VPS à côté d'Opal, dans un conteneur qui réutilise
+l'image d'Opal, et Traefik lui fournit le HTTPS. L'ESP32 s'y connecte en
+`wss://<domaine>/opal` avec un jeton secret (en-tête `Authorization: Bearer`).
+
+- Service : [deploy/docker-compose.opal-bridge.yml](deploy/docker-compose.opal-bridge.yml)
+  (image, volume, réseau Traefik et certresolver à adapter au VPS).
+- Jeton : `deploy/opal-bridge.env` sur le VPS (modèle :
+  [deploy/opal-bridge.env.example](deploy/opal-bridge.env.example)).
+- Voix : TTS OpenAI (PCM) si dispo, sinon Piper (`OPAL_PIPER_MODEL`) ou espeak-ng.
+
+En réseau local sans VPS, on peut aussi lancer le pont sur le PC :
 
 ```bash
-../Iris/.venv/Scripts/python.exe server/opal_bridge.py --iris-dir ../Iris
+OPAL_DEVICE_TOKEN=... ../Iris/.venv/Scripts/python.exe server/opal_bridge.py --iris-dir ../Iris --host 0.0.0.0
 ```
-
-Il écoute sur `ws://0.0.0.0:8765`. Au premier lancement, Windows demande
-d'autoriser Python sur le réseau privé : accepter.
-
-Voix : TTS OpenAI (PCM) si `IRIS_TTS_BACKEND=openai` avec une clé OpenAI,
-sinon la voix Windows (SAPI). Transcription : celle d'Iris (`IRIS_STT_ENGINE`).
 
 ## 2. Flasher l'ESP32
 
 1. Copier `firmware/include/secrets.example.h` en `firmware/include/secrets.h`
-   et remplir le WiFi + l'IP du PC (`ipconfig` → Adresse IPv4).
+   et remplir : WiFi, domaine du VPS, jeton (même valeur que `OPAL_DEVICE_TOKEN`).
 2. Brancher la carte sur le port USB marqué **USB** (ou **COM**), puis :
 
-```bash
-cd firmware && pio run -t upload -t monitor
+```powershell
+cd firmware
+& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e opal-s3 -t upload -t monitor
 ```
 
 ## Protocole
 
 Documenté en tête de [server/opal_bridge.py](server/opal_bridge.py) :
 JSON pour le contrôle, trames binaires PCM 16 bits mono pour l'audio
-(16 kHz micro → PC, 24 kHz PC → haut-parleur).
+(16 kHz micro → VPS, 24 kHz VPS → haut-parleur).
 
 ## Réglages utiles
 

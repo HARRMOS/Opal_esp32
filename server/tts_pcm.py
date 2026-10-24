@@ -7,12 +7,14 @@ les octets audio pour les envoyer au haut-parleur d'Opal.
 from __future__ import annotations
 
 import asyncio
+import os
 import platform
 import tempfile
 import wave
 from pathlib import Path
 
 import httpx
+import numpy as np
 
 from assistant.config.settings import Settings
 from assistant.core.logger import get_logger
@@ -24,7 +26,11 @@ SAMPLE_RATE = 24_000
 
 
 class PcmSpeechEngine:
-    """Texte → PCM 24 kHz. OpenAI si clé dispo, sinon voix système (SAPI / say)."""
+    """Texte → PCM 24 kHz. OpenAI si clé dispo, sinon voix locale.
+
+    Voix locales : SAPI (Windows), say (macOS), et sur Linux (VPS) Piper si
+    OPAL_PIPER_MODEL pointe vers un modèle .onnx, sinon espeak-ng.
+    """
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -80,12 +86,28 @@ class PcmSpeechEngine:
                     f"--data-format=LEI16@{SAMPLE_RATE}",
                     text,
                 )
+            elif piper_model := os.environ.get("OPAL_PIPER_MODEL"):
+                await self._run(
+                    "piper", "--model", piper_model, "--output_file", str(out), stdin=text
+                )
             else:
-                raise NotImplementedError(f"TTS natif non supporté sur {self._system}")
+                await self._run("espeak-ng", "-v", "fr", "-s", "160", "-w", str(out), text)
             with wave.open(str(out), "rb") as wav:
-                return wav.readframes(wav.getnframes())
+                rate = wav.getframerate()
+                pcm = wav.readframes(wav.getnframes())
+            return self._resample(pcm, rate)
         finally:
             out.unlink(missing_ok=True)
+
+    @staticmethod
+    def _resample(pcm: bytes, rate: int) -> bytes:
+        """Ramène l'audio à SAMPLE_RATE (Piper/espeak sortent en 22,05 kHz)."""
+        if rate == SAMPLE_RATE or not pcm:
+            return pcm
+        src = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+        n = int(len(src) * SAMPLE_RATE / rate)
+        out = np.interp(np.linspace(0, len(src) - 1, n), np.arange(len(src)), src)
+        return out.astype("<i2").tobytes()
 
     async def _sapi_to_wav(self, text: str, out: Path) -> None:
         voice = self._settings.tts_voice.replace('"', '`"')
