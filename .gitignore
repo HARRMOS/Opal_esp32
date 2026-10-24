@@ -11,3 +11,4 @@ __pycache__/
 
 # Jeton du pont sur le VPS
 deploy/opal-bridge.env
+deploy/models/

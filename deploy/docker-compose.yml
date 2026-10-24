@@ -1,0 +1,32 @@
+# Pont Opal Box sur le VPS, à côté du conteneur « iris » (réseau Docker « web »).
+# L'ESP32 se connecte à wss://iris.inoma.pro/opal : même domaine et même
+# certificat qu'Opal, Traefik envoie seulement le chemin /opal vers le pont.
+#
+#   cd ~/Opal_esp32/deploy && docker compose -p opal-box up -d --build
+services:
+  opal-bridge:
+    build: ../server
+    image: opal-bridge:latest
+    container_name: opal-bridge
+    restart: unless-stopped
+    env_file: opal-bridge.env          # OPAL_DEVICE_TOKEN (chmod 600, non commité)
+    environment:
+      IRIS_URL: http://iris:8765
+      IRIS_TOKEN_FILE: /run/secrets/iris_token
+    volumes:
+      - ${IRIS_DATA_DIR:-/home/ubuntu/Iris/deploy/data}/remote_token:/run/secrets/iris_token:ro
+      - ./models:/models               # modèle Whisper téléchargé une seule fois
+    networks:
+      - web
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.opal-box.entrypoints=websecure
+      - traefik.http.routers.opal-box.rule=Host(`${OPAL_DOMAIN:-iris.inoma.pro}`) && PathPrefix(`/opal`)
+      - traefik.http.routers.opal-box.tls=true
+      - traefik.http.routers.opal-box.tls.certresolver=myresolver
+      - traefik.http.services.opal-box.loadbalancer.server.port=8766
+
+networks:
+  web:
+    external: true
