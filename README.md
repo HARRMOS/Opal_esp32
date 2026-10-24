@@ -31,6 +31,10 @@ Toutes les broches se changent dans [firmware/include/config.h](firmware/include
 LED : orange = connexion, cyan = prêt, vert = écoute, violet = réflexion,
 bleu = parle, rouge = erreur.
 
+Yeux : endormis pendant la connexion, regard libre au repos, grands ouverts
+et fixés sur toi pendant l'écoute, en haut à droite pendant la réflexion,
+contents quand Opal parle, tristes en cas d'erreur.
+
 ## Yeux (2 écrans ronds GC9A01)
 
 ![Aperçu des humeurs](docs/eyes_preview.png)

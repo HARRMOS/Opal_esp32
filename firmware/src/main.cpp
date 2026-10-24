@@ -11,6 +11,7 @@
 #include <freertos/ringbuf.h>
 
 #include "config.h"
+#include "eyes.h"
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
@@ -50,9 +51,49 @@ static void showState() {
   rgbLedWrite(LED_PIN, r * k / 90, g * k / 90, b * k / 90);
 }
 
+// Expression des yeux pour chaque état d'Opal.
+static void showEyes() {
+  switch (state) {
+    case State::Connecting:
+      eyes::setMood(eyes::Mood::Sleepy);
+      eyes::autoGaze();
+      break;
+    case State::Idle:
+      eyes::setMood(eyes::Mood::Neutral);
+      eyes::autoGaze();
+      break;
+    case State::Listening:  // attentif, regarde en face
+      eyes::setMood(eyes::Mood::Surprised);
+      eyes::lookAt(0, 0);
+      break;
+    case State::Thinking:  // regarde en haut sur le côté
+      eyes::setMood(eyes::Mood::Neutral);
+      eyes::lookAt(0.55f, -0.6f);
+      break;
+    case State::Speaking:
+      eyes::setMood(eyes::Mood::Happy);
+      eyes::autoGaze();
+      break;
+    case State::Error:
+      eyes::setMood(eyes::Mood::Sad);
+      eyes::lookAt(0, 0.5f);
+      break;
+  }
+}
+
 static void setState(State s) {
+  if (s == state && s != State::Connecting) return;
   state = s;
   showState();
+  showEyes();
+}
+
+// Les yeux tournent seuls sur le cœur 0 ; loop() (WiFi, micro) reste sur le cœur 1.
+static void eyesTask(void*) {
+  for (;;) {
+    eyes::update();
+    vTaskDelay(1);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -199,8 +240,11 @@ static void handleButton() {
 void setup() {
   Serial.begin(115200);
   pinMode(PTT_PIN, INPUT_PULLUP);
-  setState(State::Connecting);
   Serial.printf("\nOpal — PSRAM %lu Ko libre\n", (unsigned long)(ESP.getFreePsram() / 1024));
+
+  eyes::begin();
+  setState(State::Connecting);
+  xTaskCreatePinnedToCore(eyesTask, "eyes", 6144, nullptr, 1, nullptr, 0);
 
   spkBuffer = xRingbufferCreateWithCaps(SPK_BUFFER_BYTES, RINGBUF_TYPE_BYTEBUF, MALLOC_CAP_SPIRAM);
   if (!spkBuffer) {
