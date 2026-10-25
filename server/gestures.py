@@ -38,8 +38,16 @@ def classify(points: np.ndarray) -> str | None:
         np.linalg.norm(pts[4] - pts[5]) > np.linalg.norm(pts[3] - pts[5]) * 1.1
     )
 
-    if all(extended) and thumb_out:
+    # « Coucou » : main levée, doigts bien droits, vers le haut et écartés. Une main qui
+    # passe de côté, à plat, ou qui tient un objet (doigts serrés ou repliés) ne compte pas.
+    straight = all(far(tip) > far(pip) * 1.2 for pip, tip in _FINGERS)
+    upright = all(pts[tip][1] < wrist[1] - 1.2 * size for _, tip in _FINGERS)
+    tips = pts[[8, 12, 16, 20]]
+    spread = float(np.mean(np.linalg.norm(np.diff(tips, axis=0), axis=1))) > 0.28 * size
+    if straight and upright and spread and thumb_out:
         return "main_ouverte"
+    if all(extended):
+        return None  # main ouverte mais pas un vrai « coucou »
     if all(folded) and thumb_out:
         knuckles_y = float(np.mean(pts[[5, 9, 13, 17], 1]))
         if pts[4][1] < knuckles_y - 0.45 * size:
@@ -77,6 +85,9 @@ class GestureDetector:
                 "points": [(float(px) / w, float(py) / h) for px, py, _ in points],
             }
             found = found or seen
+            bx, by, bw, bh = seen["box"]
+            if bx < 0.01 or by < 0.01 or bx + bw > 0.99 or by + bh > 0.99:
+                continue  # main coupée par le bord : on ne devine pas de geste
             gesture = classify(points)
             if gesture:
                 return gesture, seen

@@ -33,6 +33,9 @@ PRESENCE_LEAVE_S = 45.0      # plus de visage depuis ce délai = « départ »
 GAZE_HOLD_S = 1.2
 MAX_PHOTOS = 50
 GESTURE_COOLDOWN_S = 4.0
+# Vues consécutives exigées (≈ 3 par seconde) : le « coucou » doit être tenu ~1 s.
+GESTURE_CONFIRM = {"main_ouverte": 3, "pouce_haut": 2, "pouce_bas": 2}
+GESTURE_STILL = 0.12  # déplacement max de la main entre deux vues (fraction de l image)
 
 
 # Petites images, plusieurs analyses par seconde : un seul thread OpenCV coûte bien moins
@@ -157,6 +160,8 @@ class CameraHub:
             self.gestures = None
         self.on_gesture: Callable[[str], Awaitable[None]] | None = None
         self._last_gesture: str | None = None
+        self._gesture_streak = 0
+        self._gesture_center: tuple[float, float] | None = None
         self._gesture_at = 0.0
         self._gesture_check = 0.0
         self._last_score: float | None = None
@@ -349,16 +354,27 @@ class CameraHub:
                 hand = self.gestures.detect(img)
         return face, who, hand
 
-    async def _on_gesture_seen(self, gesture: str | None) -> None:
-        """Geste confirmé s'il est vu deux fois de suite ; 4 s de pause entre deux gestes."""
-        previous, self._last_gesture = self._last_gesture, gesture
-        if gesture is None or gesture != previous or self.on_gesture is None:
+    async def _on_gesture_seen(self, gesture: str | None, box: Any = None) -> None:
+        """Geste confirmé s'il est vu plusieurs fois de suite, main immobile (une main qui
+        passe devant la caméra ne compte pas) ; 4 s de pause entre deux gestes."""
+        center = (box[0] + box[2] / 2, box[1] + box[3] / 2) if box else None
+        moved = (
+            center is None or self._gesture_center is None
+            or abs(center[0] - self._gesture_center[0]) + abs(center[1] - self._gesture_center[1])
+            > GESTURE_STILL
+        )
+        self._gesture_center = center
+        if gesture is None or gesture != self._last_gesture or moved:
+            self._last_gesture, self._gesture_streak = gesture, 1
+            return
+        self._gesture_streak += 1
+        if self._gesture_streak < GESTURE_CONFIRM.get(gesture, 2) or self.on_gesture is None:
             return
         now = time.time()
         if now - self._gesture_at < GESTURE_COOLDOWN_S:
             return
         self._gesture_at = now
-        self._last_gesture = None
+        self._last_gesture, self._gesture_streak = None, 0
         log("gesture", gesture=gesture)
         self.seen["last_gesture"] = {"name": gesture, "at": now}
         await self.on_gesture(gesture)
@@ -381,7 +397,7 @@ class CameraHub:
             gesture, seen_hand = hand
             if seen_hand:
                 self.seen["hand"] = {**seen_hand, "gesture": gesture, "at": now}
-            await self._on_gesture_seen(gesture)
+            await self._on_gesture_seen(gesture, seen_hand["box"] if seen_hand else None)
         enrolling = self._enrolling
         if enrolling and len(enrolling["embs"]) >= enrolling["want"] and not enrolling["done"].done():
             enrolling["done"].set_result(list(enrolling["embs"]))
