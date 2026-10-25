@@ -8,6 +8,7 @@ Un navigateur déjà appairé à Opal entre directement : son cookie de session
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -23,11 +24,23 @@ PAGE = """<!doctype html>
 <style>
   body{margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;
        justify-content:center;background:#0b0d12;color:#cfd6e4;font:15px system-ui,sans-serif}
-  img{max-width:100vw;max-height:85vh;border-radius:12px;background:#000}
-  p{opacity:.6}
+  img{width:min(100vw,960px);max-height:82vh;object-fit:contain;border-radius:12px;background:#000}
+  nav{display:flex;gap:8px;margin:14px 0 4px}
+  a{color:#cfd6e4;text-decoration:none;padding:6px 14px;border:1px solid #2a3040;border-radius:999px}
+  a.on{background:#1d2333;border-color:#4a5675}
+  p{opacity:.55;margin:6px}
 </style></head>
-<body><img src="/opal/cam/stream" alt="Caméra d'Opal Box">
-<p>Opal Box · direct</p></body></html>"""
+<body><img id="v" alt="Caméra d'Opal Box">
+<nav><a id="fluide" href="?">Fluide</a><a id="net" href="?hd=1">Net</a></nav>
+<p id="info"></p>
+<script>
+  const hd = new URLSearchParams(location.search).has("hd");
+  document.getElementById("v").src = "/opal/cam/stream" + (hd ? "?hd=1" : "");
+  document.getElementById(hd ? "net" : "fluide").classList.add("on");
+  document.getElementById("info").textContent = hd
+    ? "Opal Box · direct net (640x480, environ 1 image/s)"
+    : "Opal Box · direct fluide (environ 3 images/s)";
+</script></body></html>"""
 
 
 def make_app(cams: CameraHub, password: str, iris_token: str = "") -> web.Application:
@@ -78,13 +91,15 @@ def make_app(cams: CameraHub, password: str, iris_token: str = "") -> web.Applic
             }
         )
         await response.prepare(request)
+        hd = "hd" in request.query
         cams.viewers += 1
+        cams.viewers_hd += hd
         await cams.apply_mode()
         try:
             while True:
                 async with cams.new_frame:
                     await cams.new_frame.wait()
-                jpeg = cams.frame
+                jpeg = await asyncio.to_thread(cams.enhanced)
                 if jpeg is None:
                     continue
                 await response.write(
@@ -98,6 +113,7 @@ def make_app(cams: CameraHub, password: str, iris_token: str = "") -> web.Applic
             pass
         finally:
             cams.viewers -= 1
+            cams.viewers_hd -= hd
             await cams.apply_mode()
         return response
 

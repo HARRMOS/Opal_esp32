@@ -30,6 +30,27 @@ GAZE_HOLD_S = 1.2
 MAX_PHOTOS = 50
 
 
+_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+
+def enhance(jpeg: bytes, width: int = 640) -> bytes:
+    """Rend l'image du direct plus lisible : agrandie proprement, contraste local
+    équilibré (CLAHE sur la luminance), légère accentuation des contours."""
+    img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return jpeg
+    h, w = img.shape[:2]
+    if w < width:
+        img = cv2.resize(img, (width, int(h * width / w)), interpolation=cv2.INTER_CUBIC)
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    lab[:, :, 0] = _CLAHE.apply(lab[:, :, 0])
+    img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    blur = cv2.GaussianBlur(img, (0, 0), 1.2)
+    img = cv2.addWeighted(img, 1.5, blur, -0.5, 0)
+    ok, out = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return out.tobytes() if ok else jpeg
+
+
 class FaceTracker:
     """Plus grand visage de l'image (détecteur YuNet d'OpenCV, quelques ms sur CPU)."""
 
@@ -70,6 +91,9 @@ class CameraHub:
         self.frame_at = 0.0
         self.new_frame = asyncio.Condition()
         self.viewers = 0
+        self.viewers_hd = 0
+        self._enhanced: bytes | None = None
+        self._enhanced_at = 0.0
         self._snapshot: asyncio.Future[bytes] | None = None
         self._analyzing = False
         self._hits: deque[bool] = deque(maxlen=5)
@@ -104,17 +128,32 @@ class CameraHub:
                 await self._set_present(False)
 
     async def apply_mode(self) -> None:
-        """Flux léger pour le suivi ; plus net et plus fluide quand quelqu'un regarde le direct."""
+        """Flux léger pour le suivi ; plus riche quand quelqu'un regarde le direct.
+
+        Le direct a deux modes : « fluide » (petite image, plus d'images/s) et « net »
+        (640x480). Avec un GC2145, le mode net plafonne vers 1 image/s : l'ESP32 met
+        près d'une seconde à compresser chaque image.
+        """
         if self.soft_jpeg:
             track = {"type": "cam", "fps": 2, "size": "qvga"}
             view = {"type": "cam", "fps": 3, "size": "qvga"}
+            view_hd = {"type": "cam", "fps": 2, "size": "vga"}
         else:
             track = {"type": "cam", "fps": 4, "size": "qvga"}
-            view = {"type": "cam", "fps": 10, "size": "vga"}
+            view = view_hd = {"type": "cam", "fps": 10, "size": "vga"}
         if fps := os.environ.get("OPAL_CAM_FPS"):  # réglage manuel du suivi
             track["fps"] = int(fps)
-        mode = view if self.viewers else track
+        mode = view_hd if self.viewers_hd else view if self.viewers else track
         await self._send(mode)
+
+    def enhanced(self) -> bytes | None:
+        """Dernière image améliorée pour le direct (calculée une fois par image)."""
+        if self.frame is None:
+            return None
+        if self._enhanced_at != self.frame_at:
+            self._enhanced = enhance(self.frame)
+            self._enhanced_at = self.frame_at
+        return self._enhanced
 
     async def _send(self, payload: dict[str, Any]) -> None:
         if self.ws is not None:

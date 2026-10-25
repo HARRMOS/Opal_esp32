@@ -78,8 +78,11 @@ La caméra envoie ses images au pont (wss, même jeton que les yeux). Sur le VPS
   personne pendant 45 s, `personne_partie` et les yeux s'endorment ;
 - **Opal voit sur demande** : outils `opal_box_photo` (photo 800x600 décrite par
   Claude Code, ton abonnement) et `opal_box_presence` ;
-- **direct vidéo** : https://iris.inoma.pro/opal/cam (n'importe quel identifiant +
-  le mot de passe `OPAL_VIEWER_PASSWORD` du VPS).
+- **direct vidéo** : https://iris.inoma.pro/opal/cam (sans mot de passe depuis un
+  navigateur connecté à Opal ; sinon n'importe quel identifiant + le mot de passe
+  `OPAL_VIEWER_PASSWORD` du VPS). Deux modes : « Fluide » (~3 images/s) et « Net »
+  (640x480, ~1,5 image/s avec un GC2145) ; l'image est améliorée sur le VPS
+  (agrandissement, contraste local, netteté).
 
 Afficher le mot de passe du direct :
 
