@@ -81,7 +81,8 @@ class FaceTracker:
             return None
         row = max(faces, key=lambda f: f[2] * f[3])
         x, y, fw, fh = row[:4]
-        return Face(float(x + fw / 2) / w, float(y + fh / 2) / h, float(fw) / w, row, img)
+        box = (float(x) / w, float(y) / h, float(fw) / w, float(fh) / h)
+        return Face(float(x + fw / 2) / w, float(y + fh / 2) / h, float(fw) / w, row, img, box)
 
 
 @dataclass
@@ -91,6 +92,7 @@ class Face:
     size: float
     row: np.ndarray  # ligne YuNet (boîte + points du visage), pour l'alignement SFace
     img: np.ndarray
+    box: tuple[float, float, float, float] = (0, 0, 0, 0)  # x, y, l, h normalisés (affichage)
 
 
 class CameraHub:
@@ -143,6 +145,8 @@ class CameraHub:
         self._last_gesture: str | None = None
         self._gesture_at = 0.0
         self._gesture_check = 0.0
+        self._last_score: float | None = None
+        self.seen: dict[str, Any] = {}  # dernières détections, pour la page du direct
 
     @property
     def online(self) -> bool:
@@ -305,18 +309,19 @@ class CameraHub:
             self._analyzing = True
             asyncio.create_task(self._analyze(jpeg))
 
-    def _detect(self, jpeg: bytes) -> tuple[Face | None, tuple[str, float] | None, str | None]:
+    def _detect(self, jpeg: bytes) -> tuple[Face | None, tuple[str, float] | None, Any]:
+        """Visage, identité, et main : (geste, boîte) si la main a été cherchée, sinon None."""
         face = self._tracker.find(jpeg)
         who = self._identify(face) if face is not None else None
-        gesture = None
-        # Un geste suppose quelqu'un devant la caméra ; au plus 2 analyses par seconde.
+        hand = None
+        # Un geste suppose quelqu'un devant la caméra ; au plus 3 recherches de main par seconde.
         now = time.time()
-        if self.gestures is not None and self.present and now - self._gesture_check > 0.5:
+        if self.gestures is not None and self.present and now - self._gesture_check > 0.33:
             self._gesture_check = now
             img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
             if img is not None:
-                gesture = self.gestures.detect(img)
-        return face, who, gesture
+                hand = self.gestures.detect(img)
+        return face, who, hand
 
     async def _on_gesture_seen(self, gesture: str | None) -> None:
         """Geste confirmé s'il est vu deux fois de suite ; 4 s de pause entre deux gestes."""
@@ -329,18 +334,28 @@ class CameraHub:
         self._gesture_at = now
         self._last_gesture = None
         log("gesture", gesture=gesture)
+        self.seen["last_gesture"] = {"name": gesture, "at": now}
         await self.on_gesture(gesture)
 
     async def _analyze(self, jpeg: bytes) -> None:
         try:
-            face, who, gesture = await asyncio.to_thread(self._detect, jpeg)
+            face, who, hand = await asyncio.to_thread(self._detect, jpeg)
         finally:
             self._analyzing = False
         now = time.time()
         self._hits.append(face is not None)
-        await self._on_gesture_seen(gesture)
         if who is not None:
             self._votes.append(who[0])
+            self._last_score = round(who[1], 2)
+        # Infos pour l'affichage sur la page du direct (horodatées : la page efface le périmé).
+        if face is not None:
+            self.seen["face"] = {"box": face.box, "name": self.identity,
+                                 "score": self._last_score, "at": now}
+        if hand is not None:  # la main a été cherchée sur cette image
+            gesture, box = hand
+            if box:
+                self.seen["hand"] = {"box": box, "gesture": gesture, "at": now}
+            await self._on_gesture_seen(gesture)
         enrolling = self._enrolling
         if enrolling and len(enrolling["embs"]) >= enrolling["want"] and not enrolling["done"].done():
             enrolling["done"].set_result(list(enrolling["embs"]))
@@ -395,6 +410,17 @@ class CameraHub:
         while len(self.photos) > MAX_PHOTOS:
             self.photos.popitem(last=False)
         return photo_id
+
+    def infos(self) -> dict[str, Any]:
+        """État des détections pour la page du direct (cadres, prénom, geste)."""
+        return {
+            "now": time.time(),
+            "source": self.source_name if self.ws is not None else None,
+            "present": self.present,
+            "who": self.identity if self.present else None,
+            "known": list(self.faces.people) if self.faces else [],
+            **self.seen,
+        }
 
     def presence_text(self) -> str:
         if self.ws is None:
