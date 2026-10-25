@@ -14,13 +14,15 @@ import json
 import os
 import secrets
 import time
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, deque
+from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import cv2
 import numpy as np
 
+from faces import FaceBook
 from logs import log
 
 FRAME, SNAPSHOT = 1, 2
@@ -58,8 +60,8 @@ class FaceTracker:
         model = os.environ.get("OPAL_FACE_MODEL", "/app/face_detection_yunet.onnx")
         self._detector = cv2.FaceDetectorYN.create(model, "", (320, 240), 0.7)
 
-    def find(self, jpeg: bytes) -> tuple[float, float, float] | None:
-        """Retourne (cx, cy, taille) normalisés 0..1, ou None."""
+    def find(self, jpeg: bytes) -> Face | None:
+        """Plus grand visage : position normalisée 0..1, plus de quoi le reconnaître."""
         img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             return None
@@ -71,8 +73,18 @@ class FaceTracker:
         _, faces = self._detector.detect(img)
         if faces is None or len(faces) == 0:
             return None
-        x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])[:4]
-        return float(x + fw / 2) / w, float(y + fh / 2) / h, float(fw) / w
+        row = max(faces, key=lambda f: f[2] * f[3])
+        x, y, fw, fh = row[:4]
+        return Face(float(x + fw / 2) / w, float(y + fh / 2) / h, float(fw) / w, row, img)
+
+
+@dataclass
+class Face:
+    cx: float
+    cy: float
+    size: float
+    row: np.ndarray  # ligne YuNet (boîte + points du visage), pour l'alignement SFace
+    img: np.ndarray
 
 
 class CameraHub:
@@ -104,10 +116,62 @@ class CameraHub:
         self.last_face = 0.0
         self._watchdog: asyncio.Task[None] | None = None
         self.photos: OrderedDict[str, bytes] = OrderedDict()  # photos prises pour Opal
+        # Reconnaissance des visages (facultative : sans le modèle SFace, seulement la présence).
+        try:
+            self.faces: FaceBook | None = FaceBook()
+        except cv2.error as exc:
+            log("faces_disabled", error=str(exc)[:120])
+            self.faces = None
+        self._votes: deque[str] = deque(maxlen=5)  # derniers noms reconnus ("" = inconnu)
+        self._last_identify = 0.0
+        self._enrolling: dict[str, Any] | None = None
 
     @property
     def online(self) -> bool:
         return self.ws is not None
+
+    @property
+    def identity(self) -> str | None:
+        """Qui est devant la caméra : un nom, "" pour un inconnu, None si on ne sait pas."""
+        if not self._votes:
+            return None
+        return Counter(self._votes).most_common(1)[0][0]
+
+    async def learn_face(self, name: str, samples: int = 6, timeout: float = 15.0) -> int:
+        """Mémorise le visage présent devant la caméra sous ce nom."""
+        if self.faces is None:
+            raise RuntimeError("La reconnaissance des visages n'est pas installée.")
+        if self.ws is None:
+            raise RuntimeError("La caméra d'Opal Box n'est pas connectée.")
+        done = asyncio.get_running_loop().create_future()
+        self._enrolling = {"name": name, "embs": [], "want": samples, "done": done, "last": 0.0}
+        try:
+            embs = await asyncio.wait_for(done, timeout)
+        except TimeoutError:
+            embs = self._enrolling["embs"] if self._enrolling else []
+        finally:
+            self._enrolling = None
+        if len(embs) < 2:
+            raise RuntimeError("Je ne vois pas assez bien ton visage : mets-toi face à la caméra.")
+        self.faces.remember(name, embs)
+        self._votes.clear()
+        return len(embs)
+
+    def _identify(self, face: Face) -> tuple[str, float] | None:
+        """(nom ou "" si inconnu, score), calculé au plus toutes les 1,5 s."""
+        if self.faces is None:
+            return None
+        now = time.time()
+        enrolling = self._enrolling
+        if enrolling is None and now - self._last_identify < 1.5:
+            return None
+        self._last_identify = now
+        emb = self.faces.embedding(face.img, face.row)
+        if enrolling is not None and now - enrolling["last"] > 0.3:
+            enrolling["last"] = now
+            enrolling["embs"].append(emb)
+        name, score = self.faces.identify(emb)
+        return name or "", score
 
     # ── Connexion de la caméra ──
     async def attach(self, ws: Any, hello: dict[str, Any] | None = None) -> None:
@@ -186,16 +250,25 @@ class CameraHub:
             self._analyzing = True
             asyncio.create_task(self._analyze(jpeg))
 
+    def _detect(self, jpeg: bytes) -> tuple[Face | None, tuple[str, float] | None]:
+        face = self._tracker.find(jpeg)
+        return face, (self._identify(face) if face is not None else None)
+
     async def _analyze(self, jpeg: bytes) -> None:
         try:
-            face = await asyncio.to_thread(self._tracker.find, jpeg)
+            face, who = await asyncio.to_thread(self._detect, jpeg)
         finally:
             self._analyzing = False
         now = time.time()
         self._hits.append(face is not None)
+        if who is not None:
+            self._votes.append(who[0])
+        enrolling = self._enrolling
+        if enrolling and len(enrolling["embs"]) >= enrolling["want"] and not enrolling["done"].done():
+            enrolling["done"].set_result(list(enrolling["embs"]))
         if face is not None:
             self.last_face = now
-            cx, cy, _ = face
+            cx, cy = face.cx, face.cy
             # La caméra regarde la personne : une personne à gauche de l'image est à droite
             # de l'écran vu de face. OPAL_CAM_MIRROR=1 inverse si l'image est déjà miroir.
             x = (1 - 2 * cx) if not self._mirror else (2 * cx - 1)
@@ -251,5 +324,7 @@ class CameraHub:
         minutes = int((time.time() - self.present_since) // 60)
         duree = f"{minutes} min" if minutes else "moins d'une minute"
         if self.present:
-            return f"Quelqu'un est devant Opal Box depuis {duree}."
+            who = self.identity
+            qui = who if who else "Quelqu'un que je ne connais pas" if who == "" else "Quelqu'un"
+            return f"{qui} est devant Opal Box depuis {duree}."
         return f"Personne devant Opal Box depuis {duree}."

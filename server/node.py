@@ -117,12 +117,43 @@ PRESENCE_TOOL = {
     },
 }
 
-TOOLS = [EYES_TOOL, PHOTO_TOOL, PRESENCE_TOOL]
+LEARN_FACE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "opal_box_memoriser_visage",
+        "description": (
+            "Mémorise le visage de la personne devant la caméra d'Opal Box (quelques secondes, "
+            "elle doit regarder la caméra). Ensuite Opal Box la reconnaît et la salue par son "
+            "nom. À utiliser quand on te demande de retenir ou d'apprendre un visage."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"nom": {"type": "string", "description": "Prénom de la personne."}},
+            "required": ["nom"],
+        },
+    },
+}
+
+FORGET_FACE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "opal_box_oublier_visage",
+        "description": "Oublie le visage mémorisé d'une personne (Opal Box ne la reconnaîtra plus).",
+        "parameters": {
+            "type": "object",
+            "properties": {"nom": {"type": "string"}},
+            "required": ["nom"],
+        },
+    },
+}
+
+TOOLS = [EYES_TOOL, PHOTO_TOOL, PRESENCE_TOOL, LEARN_FACE_TOOL, FORGET_FACE_TOOL]
 
 ENVIRONMENT = (
     "## OPAL BOX\n"
     "« opal-box » n'est pas un ordinateur : c'est ton corps physique posé chez l'utilisateur, "
-    "avec deux yeux animés (opal_box_yeux) et une caméra (opal_box_photo, opal_box_presence). "
+    "avec deux yeux animés (opal_box_yeux) et une caméra (opal_box_photo, opal_box_presence, "
+    "opal_box_memoriser_visage, opal_box_oublier_visage : elle reconnaît les visages appris). "
     "Ne lui envoie jamais d'outil d'ordinateur (apps, fichiers, navigateur). Tes yeux suivent "
     "seuls le visage de la personne en face. Utilise tes yeux avec naturel pour accompagner "
     "tes réponses, sans le mentionner à chaque fois."

@@ -88,6 +88,10 @@ GREETING_PROMPT = (
     "[Opal Box] Quelqu'un vient d'apparaître devant ta caméra. "
     "Salue-le en une phrase courte et naturelle, sans poser de question."
 )
+GREETING_NAMED_PROMPT = (
+    "[Opal Box] Ta caméra vient de reconnaître {name}, qui arrive devant toi. "
+    "Salue-le par son prénom en une phrase courte et naturelle, sans poser de question."
+)
 
 _MARKDOWN = re.compile(r"```[\s\S]*?```|`([^`]*)`|\*\*([^*]+)\*\*|^#{1,6}\s+|^\s*[-•*]\s+", re.M)
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
@@ -215,6 +219,21 @@ class OpalBridge:
             )
         if tool == "opal_box_presence":
             return True, self.cams.presence_text()
+        if tool == "opal_box_memoriser_visage":
+            name = str(args.get("nom") or "").strip()[:40]
+            if not name:
+                return False, "Il me faut le prénom de la personne."
+            await self.send_to_devices({"type": "eyes", "mood": "surprised", "look": [0, 0],
+                                        "hold_ms": 8000})
+            count = await self.cams.learn_face(name)
+            await self.send_to_devices({"type": "eyes", "mood": "happy", "blink": True,
+                                        "hold_ms": 3000})
+            return True, f"Visage de {name} mémorisé ({count} images). Je le reconnaîtrai."
+        if tool == "opal_box_oublier_visage":
+            name = str(args.get("nom") or "").strip()
+            if self.cams.faces is None or not self.cams.faces.forget(name):
+                return False, f"Je ne connais pas le visage de {name}."
+            return True, f"J'ai oublié le visage de {name}."
         return False, f"Outil inconnu : {tool}"
 
     async def _on_gaze(self, x: float, y: float) -> None:
@@ -229,12 +248,30 @@ class OpalBridge:
 
     async def _on_presence(self, present: bool) -> None:
         await self.send_to_devices({"type": "presence", "present": present})
+        who = self.cams.identity if present else None
+        knows_faces = bool(self.cams.faces and self.cams.faces.people)
+        stranger = present and knows_faces and who == ""
         if self.node is not None:
             event = "personne_arrivee" if present else "personne_partie"
-            await self.node.send_event(event, {"lieu": "devant Opal Box"})
+            data: dict[str, object] = {"lieu": "devant Opal Box"}
+            if present and knows_faces:
+                data["personne"] = who or "inconnu"
+            if stranger and self.cams.frame is not None:
+                photo_id = self.cams.keep_photo(self.cams.frame)
+                data["photo"] = f"{self._public_url}/opal/cam/photos/{photo_id}.jpg"
+                event = "inconnu_devant_opal_box"
+            await self.node.send_event(event, data)
         await self.update_sleep()
         if not present:
             return
+        log("arrival", person=who if knows_faces else "?")
+        if stranger:  # regard méfiant, pas de salutation
+            await self.send_to_devices({"type": "eyes", "mood": "angry", "look": [0, 0],
+                                        "hold_ms": 5000})
+            return
+        if who:
+            await self.send_to_devices({"type": "eyes", "mood": "happy", "blink": True,
+                                        "hold_ms": 3000})
         # Première arrivée du matin : le briefing remplace la salutation.
         if self.rhythm.is_morning() and self._briefing_day != self.rhythm.today():
             self._briefing_day = self.rhythm.today()
@@ -243,7 +280,7 @@ class OpalBridge:
         now = time.monotonic()
         if self._greet and self._devices and now - self._last_greeting > self._greet_cooldown:
             self._last_greeting = now
-            asyncio.create_task(self._greet_visitor())
+            asyncio.create_task(self._greet_visitor(who))
 
     async def _morning_briefing(self) -> None:
         try:
@@ -279,9 +316,10 @@ class OpalBridge:
             await self.update_sleep()
             await asyncio.sleep(20)
 
-    async def _greet_visitor(self) -> None:
+    async def _greet_visitor(self, name: str | None = None) -> None:
+        prompt = GREETING_NAMED_PROMPT.format(name=name) if name else GREETING_PROMPT
         try:
-            answer = await self._iris.ask(GREETING_PROMPT)
+            answer = await self._iris.ask(prompt)
         except Exception as exc:
             log("greeting_failed", error=str(exc))
             return
