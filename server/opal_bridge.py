@@ -38,6 +38,7 @@ Variables d'environnement :
     IRIS_URL            API d'Opal (défaut http://iris:8765, réseau Docker)
     IRIS_TOKEN          jeton distant d'Opal, ou IRIS_TOKEN_FILE (défaut /run/secrets/iris_token)
     IRIS_NODE_TOKEN     jeton des nœuds d'Opal, ou IRIS_NODE_TOKEN_FILE (défaut /run/secrets/iris_node_token)
+    OPAL_PC_MACS        adresses MAC du PC (virgules) à réveiller quand un visage connu arrive
     OPAL_VIEWER_PASSWORD  mot de passe du direct vidéo (port + 1, /opal/cam)
     CLAUDE_CODE_OAUTH_TOKEN  abonnement Claude pour décrire les photos (vision.py)
     OPAL_GREET / OPAL_GREET_COOLDOWN_S   salutation à l'arrivée (défaut 1 / 3600 s)
@@ -59,6 +60,7 @@ import time
 from datetime import date
 from http import HTTPStatus
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 import websockets
@@ -92,25 +94,21 @@ GREETING_NAMED_PROMPT = (
     "[Opal Box] Ta caméra vient de reconnaître {name}, qui arrive devant toi. "
     "Salue-le par son prénom en une phrase courte et naturelle, sans poser de question."
 )
-# Gestes musique : 👌 lance la playlist, bras croisés en X mettent en pause (via Opal).
-# Lien vers la 1re vidéo DANS la playlist : la lecture démarre tout de suite, sans passer
-# par une page « watch?list= » vide (YouTube la redirige, d'où un premier écran parasite).
-MUSIC_PLAYLIST = os.environ.get(
-    "OPAL_PLAYLIST_URL", "https://www.youtube.com/watch?v=brGjl-w5ypc&list=PLZ9izpm7vI-g"
-)
-MUSIC_REPEAT_S = 60.0  # un 👌 répété dans la minute ne rouvre pas d'onglet
-MUSIC_MACHINE = os.environ.get("OPAL_MUSIC_MACHINE", "mon PC")
-MUSIC_PROMPTS = {
-    "ok": (
-        "[Opal Box] Geste 👌 devant ta caméra : ouvre sur {machine} exactement cette URL, "
-        "sans la modifier ni l'ouvrir deux fois : {playlist} . "
-        "Ne pose pas de question, réponds en une phrase."
-    ),
-    "bras_croises": (
-        "[Opal Box] Bras croisés en X devant ta caméra : mets la musique en pause sur "
-        "{machine} (touche lecture/pause). Ne pose pas de question, réponds en une phrase."
-    ),
+# Gestes musique : 👌 lance la playlist, bras croisés en X mettent en pause. Ce sont des
+# recettes d'Opal (rejouées sans IA, instantanées) : « Opal musique » ouvre sur le PC la
+# 1re vidéo DANS la playlist (lecture immédiate), « Opal pause » appuie sur lecture/pause.
+MUSIC_RECIPES = {
+    "ok": os.environ.get("OPAL_MUSIC_RECIPE", "Opal musique"),
+    "bras_croises": os.environ.get("OPAL_PAUSE_RECIPE", "Opal pause"),
 }
+MUSIC_REPEAT_S = 60.0  # un 👌 répété dans la minute ne rouvre pas d'onglet
+# Garde : un inconnu devant la caméra sans visage connu depuis OWNER_GRACE_S → yeux fâchés.
+OWNER_GRACE_S = 20.0
+# Réveil du PC quand un visage connu arrive : Wake-on-LAN envoyé par la boîte (sur le réseau
+# de la maison) aux adresses MAC de OPAL_PC_MACS, puis recette qui rallume l'écran.
+PC_MACS = [m.strip() for m in os.environ.get("OPAL_PC_MACS", "").split(",") if m.strip()]
+WAKE_RECIPE = os.environ.get("OPAL_WAKE_RECIPE", "Opal réveil écran")
+WAKE_COOLDOWN_S = float(os.environ.get("OPAL_WAKE_COOLDOWN_S", "600"))
 
 _MARKDOWN = re.compile(r"```[\s\S]*?```|`([^`]*)`|\*\*([^*]+)\*\*|^#{1,6}\s+|^\s*[-•*]\s+", re.M)
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
@@ -154,6 +152,13 @@ class IrisClient:
         response.raise_for_status()
         return str((response.json().get("briefing") or {}).get("text") or "")
 
+    async def run_recipe(self, key: str) -> tuple[bool, str]:
+        """Rejoue une recette d'Opal (suite d'outils fixe, sans IA) : (réussie, résumé)."""
+        response = await self._client.post(f"/api/recipes/{quote(key)}/run", json={})
+        response.raise_for_status()
+        body = response.json()
+        return bool((body.get("run") or {}).get("ok")), str(body.get("summary") or "")
+
     async def ask(self, text: str) -> str:
         response = await self._client.post(
             "/api/command", json={"text": text, "timeout": IRIS_TIMEOUT_S}
@@ -193,6 +198,10 @@ class OpalBridge:
         self._briefing_day: date | None = None
         self._music_busy = False
         self._music_at: dict[str, float] = {}
+        self._owner_seen = 0.0  # dernier visage connu reconnu (monotonic)
+        self._owner_here = False
+        self._guarding = False
+        self._woke_pc_at = -WAKE_COOLDOWN_S
 
     def set_pending_confirmation(self, confirm_id: str | None) -> None:
         self.pending_confirmation = confirm_id
@@ -293,7 +302,7 @@ class OpalBridge:
                                         "hold_ms": 2500})
             await self.send_to_devices({"type": "head", "gesture": "wiggle"})
             return
-        if gesture in MUSIC_PROMPTS:
+        if gesture in MUSIC_RECIPES:
             play = gesture == "ok"
             await self.send_to_devices(
                 {"type": "eyes", "mood": "happy", "wink": 1, "look": [0, 0], "hold_ms": 3000}
@@ -337,14 +346,13 @@ class OpalBridge:
             self._music_busy = False
 
     async def _ask_music(self, gesture: str) -> None:
-        prompt = MUSIC_PROMPTS[gesture].format(playlist=MUSIC_PLAYLIST, machine=MUSIC_MACHINE)
         try:
-            answer = await self._iris.ask(prompt)
+            ok, summary = await self._iris.run_recipe(MUSIC_RECIPES[gesture])
         except Exception as exc:
-            log("music_failed", gesture=gesture, error=str(exc))
+            ok, summary = False, str(exc)
+        log("music", gesture=gesture, ok=ok, text=summary[:200])
+        if not ok:
             await self.send_to_devices({"type": "eyes", "mood": "sad", "hold_ms": 2500})
-            return
-        log("music", gesture=gesture, text=answer[:200])
 
     async def _on_recording(self, on: bool) -> None:
         log("live_view", watched=on)
@@ -422,6 +430,54 @@ class OpalBridge:
             self._asleep = asleep
             log("sleep", asleep=asleep)
             await self.send_to_devices({"type": "sleep", "on": asleep})
+
+    async def guard_loop(self) -> None:
+        """Chaque seconde : visage connu → réveil du PC à son arrivée ; inconnu seul → yeux fâchés."""
+        while True:
+            await asyncio.sleep(1.0)
+            try:
+                await self._guard_tick()
+            except Exception as exc:
+                log("guard_failed", error=str(exc))
+
+    async def _guard_tick(self) -> None:
+        now = time.monotonic()
+        cams = self.cams
+        who = cams.identity if cams.present else None
+        if who:
+            self._owner_seen = now
+            if not self._owner_here:
+                self._owner_here = True
+                asyncio.create_task(self._wake_pc(who))
+        elif not cams.present:
+            self._owner_here = False
+        knows_faces = bool(cams.faces and cams.faces.people)
+        stranger = (
+            cams.present and knows_faces and who == "" and len(cams.votes) >= 3
+            and now - self._owner_seen > OWNER_GRACE_S
+        )
+        if stranger != self._guarding:
+            self._guarding = stranger
+            log("guard", stranger=stranger)
+        # Tenu 4 s, renouvelé toutes les secondes : fâché tant que l'inconnu est là.
+        if stranger:
+            await self.send_to_devices({"type": "eyes", "mood": "angry", "hold_ms": 4000})
+
+    async def _wake_pc(self, who: str) -> None:
+        now = time.monotonic()
+        if now - self._woke_pc_at < WAKE_COOLDOWN_S:
+            return
+        self._woke_pc_at = now
+        if PC_MACS:
+            sent = await self.send_to_devices({"type": "wol", "macs": PC_MACS})
+            log("wake_pc", person=who, wol_boxes=sent)
+        # PC allumé mais écran éteint : une touche le rallume (échoue sans gêne s'il dort).
+        await asyncio.sleep(8 if PC_MACS else 0)
+        try:
+            ok, summary = await self._iris.run_recipe(WAKE_RECIPE)
+        except Exception as exc:
+            ok, summary = False, str(exc)
+        log("wake_screen", ok=ok, text=summary[:160])
 
     async def rhythm_loop(self) -> None:
         while True:
@@ -616,6 +672,7 @@ async def run(host: str, port: int, device_token: str) -> None:
     )
     activity.start()
     rhythm_task = asyncio.create_task(bridge.rhythm_loop())  # noqa: F841 (vit avec le pont)
+    guard_task = asyncio.create_task(bridge.guard_loop())  # noqa: F841
     if node_token := iris_node_token():
         node_url = iris_url.replace("http", "ws", 1).rstrip("/") + "/node"
         bridge.node = OpalNode(node_url, node_token, bridge.handle_tool)

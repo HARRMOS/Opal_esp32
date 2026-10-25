@@ -179,7 +179,15 @@ un pouce levé ou une main ouverte. Opal la pilote avec l'outil `opal_box_tete`.
   événement `inconnu_devant_opal_box` avec photo (à transformer en notification par un
   déclencheur « sur événement » dans Opal).
 - **Gestes** : main ouverte = coucou ; pouce levé / baissé = valide / refuse la
-  confirmation d'Opal en attente.
+  confirmation d'Opal en attente ; 👌 = recette Opal « Opal musique » (playlist YouTube sur
+  le PC) ; bras croisés en X = recette « Opal pause » (touche lecture/pause). Les recettes
+  sont rejouées sans IA, donc instantanées.
+- **Garde** : un inconnu devant la caméra sans visage connu depuis 20 s = yeux fâchés tant
+  qu'il reste.
+- **Réveil du PC** : quand un visage connu arrive (au plus toutes les 10 min), la boîte envoie
+  un Wake-on-LAN aux MAC de `OPAL_PC_MACS`, puis la recette « Opal réveil écran » (Maj) rallume
+  l'écran. Le réveil depuis la veille exige « Wake on Magic Packet » activé sur la carte
+  réseau du PC (Ethernet de préférence : en Wi-Fi c'est rarement pris en charge).
 - **iPhone ou Mac comme caméra** : https://iris.inoma.pro/opal/cam/envoyer, bouton
   Démarrer. L'appareil remplace l'ESP32-CAM tant que la page est ouverte.
 

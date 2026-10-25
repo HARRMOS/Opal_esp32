@@ -8,6 +8,7 @@
 #include <ESP_I2S.h>
 #include <WebSocketsClient.h>
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <freertos/ringbuf.h>
 
 #include "ca_certs.h"
@@ -181,6 +182,27 @@ static void sendJson(const char* type) {
   ws.sendTXT(out);
 }
 
+// Wake-on-LAN : le pont est sur le VPS, seule la boîte est sur le réseau de la maison.
+// Paquet magique = 6 × 0xFF puis 16 × l'adresse MAC, en diffusion UDP (port 9).
+static bool sendWakeOnLan(const char* mac) {
+  uint8_t m[6];
+  if (sscanf(mac, "%hhx%*1[:-]%hhx%*1[:-]%hhx%*1[:-]%hhx%*1[:-]%hhx%*1[:-]%hhx",
+             &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) != 6) return false;
+  uint8_t packet[102];
+  memset(packet, 0xFF, 6);
+  for (int i = 0; i < 16; i++) memcpy(packet + 6 + i * 6, m, 6);
+  WiFiUDP udp;
+  const IPAddress targets[] = {IPAddress(255, 255, 255, 255), WiFi.broadcastIP()};
+  for (const IPAddress& ip : targets) {
+    for (int i = 0; i < 3; i++) {  // UDP sans accusé : on insiste un peu
+      udp.beginPacket(ip, 9);
+      udp.write(packet, sizeof(packet));
+      udp.endPacket();
+    }
+  }
+  return true;
+}
+
 static void onText(const uint8_t* payload, size_t length) {
   JsonDocument doc;
   if (deserializeJson(doc, payload, length)) return;
@@ -236,6 +258,11 @@ static void onText(const uint8_t* payload, size_t length) {
     personPresent = doc["present"] | true;
     if (personPresent) eyes::blink();  // réveil
     showEyes();
+  } else if (strcmp(type, "wol") == 0) {  // réveiller le PC de la maison
+    for (JsonVariant mac : doc["macs"].as<JsonArray>()) {
+      const bool ok = sendWakeOnLan(mac | "");
+      Serial.printf("Réveil réseau %s : %s\n", (const char*)(mac | ""), ok ? "envoyé" : "MAC invalide");
+    }
   } else if (strcmp(type, "error") == 0) {
     Serial.printf("Erreur : %s\n", (const char*)(doc["message"] | ""));
     setState(State::Error);
