@@ -93,14 +93,18 @@ GREETING_NAMED_PROMPT = (
     "Salue-le par son prénom en une phrase courte et naturelle, sans poser de question."
 )
 # Gestes musique : 👌 lance la playlist, bras croisés en X mettent en pause (via Opal).
+# Lien vers la 1re vidéo DANS la playlist : la lecture démarre tout de suite, sans passer
+# par une page « watch?list= » vide (YouTube la redirige, d'où un premier écran parasite).
 MUSIC_PLAYLIST = os.environ.get(
-    "OPAL_PLAYLIST_URL", "https://youtube.com/playlist?list=PLZ9izpm7vI-g&si=AwEQDdFe-6q8TVlu"
+    "OPAL_PLAYLIST_URL", "https://www.youtube.com/watch?v=brGjl-w5ypc&list=PLZ9izpm7vI-g"
 )
+MUSIC_REPEAT_S = 60.0  # un 👌 répété dans la minute ne rouvre pas d'onglet
 MUSIC_MACHINE = os.environ.get("OPAL_MUSIC_MACHINE", "mon PC")
 MUSIC_PROMPTS = {
     "ok": (
-        "[Opal Box] Geste 👌 devant ta caméra : lance tout de suite ma playlist YouTube "
-        "{playlist} sur {machine}, en lecture. Ne pose pas de question, réponds en une phrase."
+        "[Opal Box] Geste 👌 devant ta caméra : ouvre sur {machine} exactement cette URL, "
+        "sans la modifier ni l'ouvrir deux fois : {playlist} . "
+        "Ne pose pas de question, réponds en une phrase."
     ),
     "bras_croises": (
         "[Opal Box] Bras croisés en X devant ta caméra : mets la musique en pause sur "
@@ -187,6 +191,8 @@ class OpalBridge:
         self._asleep = False
         self._last_activity = 0.0
         self._briefing_day: date | None = None
+        self._music_busy = False
+        self._music_at: dict[str, float] = {}
 
     def set_pending_confirmation(self, confirm_id: str | None) -> None:
         self.pending_confirmation = confirm_id
@@ -317,6 +323,20 @@ class OpalBridge:
         log("gesture_reaction", gesture=gesture, devices=sent)
 
     async def _music(self, gesture: str) -> None:
+        """Une demande à la fois ; un 👌 répété dans la minute est ignoré (pas de 2e onglet)."""
+        now = time.monotonic()
+        if self._music_busy or (
+            gesture == "ok" and now - self._music_at.get("ok", -MUSIC_REPEAT_S) < MUSIC_REPEAT_S
+        ):
+            log("music_skipped", gesture=gesture)
+            return
+        self._music_busy, self._music_at[gesture] = True, now
+        try:
+            await self._ask_music(gesture)
+        finally:
+            self._music_busy = False
+
+    async def _ask_music(self, gesture: str) -> None:
         prompt = MUSIC_PROMPTS[gesture].format(playlist=MUSIC_PLAYLIST, machine=MUSIC_MACHINE)
         try:
             answer = await self._iris.ask(prompt)
