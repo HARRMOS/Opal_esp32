@@ -7,6 +7,7 @@
 #include <math.h>
 
 #include "config.h"
+#include "scenes.h"
 
 namespace eyes {
 namespace {
@@ -95,9 +96,10 @@ inline uint16_t blend565(uint16_t a, uint16_t b, uint32_t alpha) {
 
 constexpr uint16_t PUPIL = rgb(4, 5, 9);
 // Paupières noir mat : elles se fondent dans le bord de l'écran, l'œil semble flotter.
-constexpr uint16_t LID = rgb(16, 15, 20);
-constexpr uint16_t RIM_UPPER = rgb(84, 80, 98);   // liseré qui accroche la lumière
-constexpr uint16_t RIM_LOWER = rgb(58, 55, 68);
+// Le style « gardien » les teinte de rouge sombre.
+uint16_t LID = rgb(16, 15, 20);
+uint16_t RIM_UPPER = rgb(84, 80, 98);   // liseré qui accroche la lumière
+uint16_t RIM_LOWER = rgb(58, 55, 68);
 constexpr uint16_t SPECULAR = rgb(255, 255, 255);
 
 struct Palette {
@@ -122,6 +124,23 @@ uint8_t shadeLut[(2 * 121 * 121 >> 5) + 1];  // ombrage sphérique selon r², 0.
 uint8_t spanHalf[H];  // demi-largeur visible de chaque ligne de l'écran rond
 float lidCurve[W];
 uint16_t* strip[2][2];
+
+// Style « gardien » : objectif rouge sans pupille, cœur incandescent, qui pulse.
+volatile Style style = Style::Opal;
+uint16_t guardRing[RINGS];  // couleur selon la distance au centre (l'objectif est radial)
+constexpr uint16_t GUARD_CORE = rgb(255, 240, 200);
+constexpr uint16_t GUARD_SCLERA = rgb(4, 2, 3);
+int guardPulse = 32, guardCore = 20;
+
+// Animations plein écran : un sprite 240×240 par œil (PSRAM).
+lgfx::LGFX_Sprite sprite[2];
+volatile bool sceneRequested = false;
+Scene sceneWanted = Scene::None;
+SceneInfo infoWanted;
+uint32_t sceneWantedMs = 0;
+Scene sceneNow = Scene::None;  // lu par les deux tâches pendant l'image
+SceneInfo sceneInfo;
+uint32_t sceneStart = 0, sceneUntil = 0;
 
 uint32_t seed = 0x6F70616C;  // "opal" : textures identiques à chaque démarrage
 float rnd() {
@@ -256,6 +275,21 @@ void buildOpalIris() {
       b += (1 - b) * smoothstep(0.84f, 1.f, t) * 0.7f;
       irisTex[a * RINGS + r] = rgbf(col[0] * b, col[1] * b, col[2] * b);
     }
+  }
+}
+
+void buildGuardRing() {
+  const float white[3] = {255, 250, 210}, core[3] = {255, 190, 40}, red[3] = {230, 20, 20};
+  const float edge[3] = {40, 0, 2}, ring[3] = {90, 92, 100};
+  for (int r = 0; r < RINGS; r++) {
+    const float t = (r + 0.5f) / RINGS;
+    float col[3];
+    if (t < 0.18f) lerp3(white, core, t / 0.18f, col);
+    else if (t < 0.55f) lerp3(core, red, (t - 0.18f) / 0.37f, col);
+    else lerp3(red, edge, smoothstep(0.55f, 1.f, t), col);
+    const float k = expf(-powf((t - 0.92f) / 0.025f, 2)) * 0.8f;  // bague métallique
+    lerp3(col, ring, k, col);
+    guardRing[r] = rgbf(col[0], col[1], col[2]);
   }
 }
 
@@ -553,6 +587,25 @@ void animate() {
   anim.pupil += (pupilTarget - anim.pupil) * min(1.f, dt * 3);
 
   animateLens(now, dt);
+  const bool guard = style == Style::Guard;
+  LID = guard ? rgb(6, 2, 2) : rgb(16, 15, 20);
+  RIM_UPPER = guard ? rgb(120, 20, 20) : rgb(84, 80, 98);
+  RIM_LOWER = guard ? rgb(60, 10, 10) : rgb(58, 55, 68);
+  guardPulse = 24 + (int)(8 * sinf(now * 0.006f));
+  guardCore = 10 + (int)(constrain(anim.pupil, 0.f, 1.f) * 18);
+
+  if (sceneRequested) {
+    sceneNow = sceneWanted;
+    sceneInfo = infoWanted;
+    sceneStart = now;
+    sceneUntil = sceneWantedMs ? now + sceneWantedMs : 0;
+    sceneRequested = false;
+  }
+  if (sceneNow == Scene::Timer && sceneInfo.timerMs && now - sceneStart >= sceneInfo.timerMs) {
+    sceneUntil = now;  // minuteur écoulé : retour aux yeux, qui clignent
+    anim.blinkRequest = true;
+  }
+  if (sceneNow != Scene::None && sceneUntil && (int32_t)(now - sceneUntil) >= 0) sceneNow = Scene::None;
   // Sommeil : les paupières se ferment lentement et l'écran s'assombrit ; réveil plus vif.
   const float sleepTarget = sleepWanted ? 1.f : 0.f;
   sleepAmount += (sleepTarget - sleepAmount) * min(1.f, dt * (sleepWanted ? 0.8f : 3.f));
@@ -635,6 +688,7 @@ void renderStrip(int e, int y0, uint16_t* out) {
     const int dh1sq = dh1 * dh1, dh2sq = dh2 * dh2;
     const uint32_t ditherRow = y & 1;
     const int lensAlpha = lens.alpha, flash = lens.flash, dim = dimLevel;
+    const bool guard = style == Style::Guard;
     const int recDy = y - REC_Y;
     const bool recRow = e == 1 && lens.rec && recDy * recDy < REC_R2;
 
@@ -660,7 +714,9 @@ void renderStrip(int e, int y0, uint16_t* out) {
             const int d2 = p >> 8;
             if (d2 < IRIS_D) {
               inIris = true;
-              if (d2 < f.pupil2) {
+              if (guard) {
+                c = d2 < guardCore ? GUARD_CORE : scale565(guardRing[(d2 * RINGS) / IRIS_D], guardPulse);
+              } else if (d2 < f.pupil2) {
                 c = PUPIL;
               } else {
                 const int ring = ((d2 - f.pupil2) * f.ringScale) >> 8;
@@ -670,7 +726,7 @@ void renderStrip(int e, int y0, uint16_t* out) {
             }
           }
         }
-        if (!inIris) c = scleraRow[x];
+        if (!inIris) c = guard ? GUARD_SCLERA : scleraRow[x];
         c = scale565(c, shade);
 
         const int below = -coverU >> 4;  // ombre portée de la paupière supérieure
@@ -678,7 +734,7 @@ void renderStrip(int e, int y0, uint16_t* out) {
         const int above = -coverL >> 4;  // léger creux d'ombre au ras de la paupière inférieure
         if (above < 3) c = scale565(c, 22 + max(above, 0) * 3);
 
-        if (inIris) {
+        if (inIris && !guard) {
           if (dh1sq < 121) {
             const int a = x - hx1, d = a * a + dh1sq;
             if (d < 121) c = blend565(c, SPECULAR, d < 36 ? 28 : (121 - d) * 28 / 85);
@@ -703,7 +759,18 @@ void renderStrip(int e, int y0, uint16_t* out) {
   }
 }
 
+void drawScene(int e) {
+  scenes::draw(e, sprite[e], sceneNow, sceneInfo, millis(), sceneStart);
+  lcd[e]->startWrite();
+  sprite[e].pushSprite(lcd[e], 0, 0);
+  lcd[e]->endWrite();
+}
+
 void drawEye(int e) {
+  if (sceneNow != Scene::None && sprite[e].getBuffer()) {
+    drawScene(e);
+    return;
+  }
   lcd[e]->startWrite();
   int k = 0;
   for (int y = 0; y < H; y += STRIP_H, k ^= 1) {
@@ -763,7 +830,13 @@ void begin(IrisColor color) {
   buildHexScale();
   buildPolar();
   buildIrisFor(color);
+  buildGuardRing();
   buildSclera();
+  for (auto& s : sprite) {  // animations : un écran complet par œil, en PSRAM
+    s.setPsram(true);
+    s.setColorDepth(16);
+    if (!s.createSprite(W, H)) Serial.println("eyes: sprite d'animation impossible");
+  }
   Serial.printf("eyes: textures prêtes en %lu ms\n", (unsigned long)(millis() - t0));
 
   const uint8_t rot[2] = {EYE_L_ROTATION, EYE_R_ROTATION};
@@ -805,6 +878,17 @@ void cameraShoot() { lensAnim.request = 1; }
 void cameraDone() { lensAnim.request = 2; }
 void setRecording(bool on) { lensAnim.recording = on; }
 void setAsleep(bool asleep) { sleepWanted = asleep; }
+void setStyle(Style s) { style = s; }
+
+void showScene(Scene s, uint32_t durationMs, const SceneInfo* info) {
+  while (sceneRequested) delay(1);  // la demande précédente n'est pas encore prise
+  sceneWanted = s;
+  infoWanted = info ? *info : SceneInfo{};
+  sceneWantedMs = durationMs;
+  sceneRequested = true;
+}
+void endScene() { showScene(Scene::None, 0); }
+Scene scene() { return sceneRequested ? sceneWanted : sceneNow; }
 
 float fps() { return fpsValue; }
 

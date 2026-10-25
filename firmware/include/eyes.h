@@ -29,6 +29,29 @@ void cameraDone();
 void setRecording(bool on);  // voyant rouge sur l'œil droit pendant le direct
 void setAsleep(bool asleep); // paupières closes + écran assombri (la nuit)
 
+// Style d'œil : l'opale réaliste, ou le « gardien » (objectif rouge qui pulse).
+enum class Style : uint8_t { Opal, Guard };
+void setStyle(Style style);
+
+// Animations plein écran (autres que des yeux), dessinées à la place des yeux.
+enum class Scene : uint8_t {
+  None, Hearts, Clock, Weather, Music, Thinking, Timer, Sleep, Message, Dizzy, Matrix, Boot
+};
+// Données des animations qui en ont besoin (météo, minuteur, messages).
+struct SceneInfo {
+  int temp = 0, tmin = 0, tmax = 0;
+  char icon[8] = "sun";    // sun, cloud, rain, snow, storm, fog
+  char desc[28] = "";
+  char place[20] = "";
+  int count = 0;           // nombre de messages
+  char label[24] = "";     // texte libre (minuteur, messages)
+  uint32_t timerMs = 0;    // durée du minuteur
+};
+// durationMs = 0 : jusqu'à endScene() (ou une autre animation).
+void showScene(Scene scene, uint32_t durationMs, const SceneInfo* info = nullptr);
+void endScene();
+Scene scene();
+
 float fps();
 
 }  // namespace eyes

@@ -130,6 +130,9 @@ static void applyEyesCommand(JsonDocument& doc) {
   if (doc["blink"] | false) eyes::blink();
   if (!doc["wink"].isNull()) eyes::wink(doc["wink"] | 1);
   if (!doc["pupil"].isNull()) eyes::setPupil(doc["pupil"] | -1.f);
+  const char* style = doc["style"] | "";
+  if (strcmp(style, "gardien") == 0) eyes::setStyle(eyes::Style::Guard);
+  else if (strcmp(style, "opale") == 0) eyes::setStyle(eyes::Style::Opal);
 
   uint32_t hold = doc["hold_ms"] | 8000;
   eyesHeld = true;
@@ -203,6 +206,35 @@ static bool sendWakeOnLan(const char* mac) {
   return true;
 }
 
+// {"type":"scene","name":"horloge","ms":10000, + données : temp, min, max, icon, desc,
+//  place (météo) ; minutes, label (minuteur) ; count, label (message)}. "aucune" = les yeux.
+static void applySceneCommand(JsonDocument& doc) {
+  static const char* const NAMES[] = {"aucune", "coeurs", "horloge", "meteo", "musique",
+                                      "reflexion", "minuteur", "sommeil", "message",
+                                      "etourdi", "matrix", "demarrage"};
+  const char* name = doc["name"] | "aucune";
+  int index = -1;
+  for (int i = 0; i < 12; i++)
+    if (strcmp(name, NAMES[i]) == 0) index = i;
+  if (index <= 0) {
+    eyes::endScene();
+    return;
+  }
+  eyes::SceneInfo info;
+  info.temp = doc["temp"] | 0;
+  info.tmin = doc["min"] | 0;
+  info.tmax = doc["max"] | 0;
+  strlcpy(info.icon, doc["icon"] | "sun", sizeof(info.icon));
+  strlcpy(info.desc, doc["desc"] | "", sizeof(info.desc));
+  strlcpy(info.place, doc["place"] | "", sizeof(info.place));
+  strlcpy(info.label, doc["label"] | "", sizeof(info.label));
+  info.count = doc["count"] | 0;
+  info.timerMs = (uint32_t)((doc["minutes"] | 0.f) * 60000);
+  uint32_t ms = doc["ms"] | 8000;
+  if ((eyes::Scene)index == eyes::Scene::Timer && info.timerMs) ms = 0;  // s'arrête seul à la fin
+  eyes::showScene((eyes::Scene)index, ms, &info);
+}
+
 static void onText(const uint8_t* payload, size_t length) {
   JsonDocument doc;
   if (deserializeJson(doc, payload, length)) return;
@@ -247,9 +279,13 @@ static void onText(const uint8_t* payload, size_t length) {
       if (strcmp(look.as<const char*>(), "center") == 0) head::center();
       else head::setIdle(true);
     }
+  } else if (strcmp(type, "scene") == 0) {  // animation plein écran
+    applySceneCommand(doc);
   } else if (strcmp(type, "sleep") == 0) {  // la nuit, sans personne devant la caméra
     const bool asleep = doc["on"] | false;
     eyes::setAsleep(asleep);
+    if (asleep) eyes::showScene(eyes::Scene::Sleep, 0);
+    else if (eyes::scene() == eyes::Scene::Sleep) eyes::endScene();
     if (asleep) head::center();  // la tête revient doucement au centre pour dormir
     else head::setIdle(true);
   } else if (strcmp(type, "recording") == 0) {  // quelqu'un regarde le direct
@@ -349,6 +385,7 @@ void setup() {
   Serial.printf("\nOpal — PSRAM %lu Ko libre\n", (unsigned long)(ESP.getFreePsram() / 1024));
 
   eyes::begin();  // les yeux tournent seuls, un œil par cœur
+  eyes::showScene(eyes::Scene::Boot, 3800);
   head::begin();  // tête au centre (moment de visser le palonnier bien droit)
   setState(State::Connecting);
 
@@ -384,7 +421,8 @@ void setup() {
 
 #if OPAL_USE_TLS
   // Le certificat du VPS n'est vérifiable qu'avec l'heure exacte.
-  configTime(0, 0, "pool.ntp.org", "time.google.com");
+  // Heure de Paris (horloge des écrans), changement d'heure compris.
+  configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.google.com");
   Serial.print("Heure NTP");
   while (time(nullptr) < 1700000000) {
     delay(300);
@@ -415,6 +453,18 @@ void loop() {
   if (millis() - lastFps > 30000) {
     lastFps = millis();
     Serial.printf("yeux : %.1f fps\n", eyes::fps());
+  }
+  // Mise au point : une ligne JSON reçue sur le port USB est traitée comme un message du pont
+  // (ex. {"type":"scene","name":"coeurs","ms":5000}).
+  static String serialLine;
+  while (Serial.available()) {
+    const char ch = Serial.read();
+    if (ch == '\n') {
+      onText((const uint8_t*)serialLine.c_str(), serialLine.length());
+      serialLine = "";
+    } else if (serialLine.length() < 512) {
+      serialLine += ch;
+    }
   }
   if (recording) streamMic();
   else delay(2);

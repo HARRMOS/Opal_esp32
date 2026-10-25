@@ -33,7 +33,7 @@ from logs import log
 SendEyes = Callable[[dict[str, Any]], Awaitable[int]]
 
 # Outils qui ont déjà leur propre animation sur Opal Box.
-_BOX_TOOLS = ("opal_box_yeux", "opal_box_photo", "opal_box_presence")
+_BOX_TOOLS = ("opal_box_yeux", "opal_box_photo", "opal_box_presence", "opal_box_ecran")
 
 
 def _plain(text: str) -> str:
@@ -105,12 +105,16 @@ class OpalActivity:
                 log("activity_link_lost", error=str(exc))
             await asyncio.sleep(5)
 
-    async def _eyes(self, state: str, **cmd: Any) -> None:
-        """Envoie une expression, sans répéter le même état (la réflexion est bavarde)."""
+    async def _eyes(self, state: str, scene: str = "aucune", **cmd: Any) -> None:
+        """Envoie une expression, sans répéter le même état (la réflexion est bavarde).
+
+        Réflexion et outils s'affichent aussi en animation (orbites, pluie Matrix) ; les
+        autres états la retirent. Le pont ne remplace jamais une animation choisie (minuteur…)."""
         if state == self._state and state in ("thinking", "tool"):
             return
         self._state = state
         sent = await self._send_eyes({"type": "eyes", **cmd})
+        await self._send_eyes({"type": "scene", "name": scene, "ms": 20000, "auto": True})
         log("activity", state=state, mood=cmd.get("mood"), devices=sent)
 
     async def _handle(self, event: dict[str, Any]) -> None:
@@ -120,14 +124,14 @@ class OpalActivity:
             self._opal_chose_eyes = False
             await self._eyes("listening", mood="surprised", look=[0, 0], hold_ms=4000)
         elif kind in ("thinking", "iteration", "plan_step_start"):
-            await self._eyes("thinking", mood="neutral", look=[0.55, -0.6], hold_ms=20000)
+            await self._eyes("thinking", "reflexion", mood="neutral", look=[0.55, -0.6], hold_ms=20000)
         elif kind == "tool_call":
             tool = str(data.get("tool") or data.get("name") or "")
             if tool in _BOX_TOOLS:
                 self._opal_chose_eyes = self._opal_chose_eyes or tool == "opal_box_yeux"
                 self._state = "box_tool"
                 return
-            await self._eyes("tool", mood="neutral", look=[-0.25, 0.55], pupil=0.25, hold_ms=20000)
+            await self._eyes("tool", "matrix", mood="neutral", look=[-0.25, 0.55], pupil=0.25, hold_ms=20000)
         elif kind == "assistant_message":
             if self._opal_chose_eyes:
                 self._state = "answered"
