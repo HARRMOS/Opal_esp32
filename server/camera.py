@@ -149,6 +149,10 @@ class CameraHub:
         return self.ws is not None
 
     @property
+    def votes(self) -> tuple[str, ...]:
+        return tuple(self._votes)
+
+    @property
     def identity(self) -> str | None:
         """Qui est devant la caméra : un nom, "" pour un inconnu, None si on ne sait pas."""
         if not self._votes:
@@ -181,7 +185,9 @@ class CameraHub:
             return None
         now = time.time()
         enrolling = self._enrolling
-        if enrolling is None and now - self._last_identify < 1.5:
+        # À l'arrivée, on identifie souvent (2 fois/s) ; ensuite toutes les 1,5 s suffisent.
+        interval = 0.5 if not self.present or len(self._votes) < 3 else 1.5
+        if enrolling is None and now - self._last_identify < interval:
             return None
         self._last_identify = now
         emb = self.faces.embedding(face.img, face.row)
@@ -196,13 +202,26 @@ class CameraHub:
         """Nouvelle source d'images. La plus récente est active (ex. l'iPhone ouvert sur
         la page « envoyer » passe devant l'ESP32-CAM) ; à son départ la précédente reprend."""
         self._sources = [(w, h) for w, h in self._sources if w is not ws] + [(ws, hello or {})]
-        await self._activate(ws, hello or {})
+        await self._activate(*self._preferred_source())
+        if ws is not self.ws:  # source en retrait : 1 image/s suffit, inutile de charger son WiFi
+            try:
+                await ws.send(json.dumps({"type": "cam", "fps": 1, "size": "qvga"}))
+            except Exception:
+                pass
         if not self.present:
             self.present_since = time.time()  # « personne depuis » compte depuis la connexion
         if self._watchdog is None or self._watchdog.done():
             self._watchdog = asyncio.create_task(self._presence_watchdog())
 
+    def _preferred_source(self) -> tuple[Any, dict[str, Any]]:
+        """Une page « envoyer » ouverte (iPhone, Mac) passe toujours avant l'ESP32-CAM,
+        même si celle-ci se reconnecte après ; sinon la source la plus récente."""
+        browsers = [s for s in self._sources if s[1].get("sensor") == "navigateur"]
+        return (browsers or self._sources)[-1]
+
     async def _activate(self, ws: Any, hello: dict[str, Any]) -> None:
+        if ws is self.ws:
+            return
         self.ws = ws
         # Un capteur sans JPEG matériel (GC2145) compresse sur l'ESP32 : au-delà de
         # 2 à 3 images/s, son WiFi décroche. Un OV2640 ou un téléphone tiennent bien plus.
@@ -218,7 +237,7 @@ class CameraHub:
         if self._snapshot and not self._snapshot.done():
             self._snapshot.set_exception(RuntimeError("Caméra déconnectée."))
         if self._sources:
-            await self._activate(*self._sources[-1])
+            await self._activate(*self._preferred_source())
             return
         self.ws = None
         if self.present:

@@ -77,7 +77,8 @@ static void showEyes() {
       eyes::autoGaze();
       break;
     case State::Idle:
-      eyes::setMood(personPresent ? eyes::Mood::Neutral : eyes::Mood::Sleepy);
+      // Éveillée toute la journée ; le sommeil est réservé à la nuit (message « sleep »).
+      eyes::setMood(eyes::Mood::Neutral);
       eyes::autoGaze();
       break;
     case State::Listening:  // attentif, regarde en face

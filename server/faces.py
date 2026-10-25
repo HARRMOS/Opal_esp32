@@ -16,7 +16,7 @@ import numpy as np
 
 from logs import log
 
-MATCH_THRESHOLD = 0.40  # similarité cosinus SFace (0.363 = seuil conseillé, un peu plus strict)
+MATCH_THRESHOLD = 0.363  # similarité cosinus SFace : seuil conseillé par OpenCV
 MAX_EMBEDDINGS = 20
 
 

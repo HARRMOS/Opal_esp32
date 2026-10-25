@@ -147,4 +147,6 @@ class OpalActivity:
         elif kind in ("notice", "node_event", "briefing", "suggestion"):
             if kind == "notice" and "opal-box" in str(data.get("message", "")).lower():
                 return  # ses propres connexions / déconnexions
+            if kind == "node_event" and data.get("node") == "opal-box":
+                return  # ses propres événements (geste, présence) : déjà animés par le pont
             await self._eyes("notify", mood="surprised", blink=True, hold_ms=2500)

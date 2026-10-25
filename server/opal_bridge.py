@@ -165,6 +165,7 @@ class OpalBridge:
         self._last_gaze = 0.0
         self._last_greeting = 0.0
         self._greet = os.environ.get("OPAL_GREET", "1") == "1"
+        self._greet_cooldown = float(os.environ.get("OPAL_GREET_COOLDOWN_S", "3600"))
         self._public_url = os.environ.get("OPAL_PUBLIC_URL", "https://iris.inoma.pro").rstrip("/")
         self.pending_confirmation: str | None = None  # validable d'un pouce levé
         self.rhythm = DayRhythm()
@@ -174,7 +175,6 @@ class OpalBridge:
 
     def set_pending_confirmation(self, confirm_id: str | None) -> None:
         self.pending_confirmation = confirm_id
-        self._greet_cooldown = float(os.environ.get("OPAL_GREET_COOLDOWN_S", "3600"))
 
     def _update_node(self) -> None:
         """Le nœud « opal-box » existe pour Opal tant qu'un appareil est en ligne.
@@ -266,8 +266,15 @@ class OpalBridge:
             log("gesture_confirm", approved=approved, ok=ok)
             if ok:
                 self.pending_confirmation = None
-        await self.send_to_devices({"type": "eyes", "mood": "happy" if approved else "sad",
-                                    "blink": True, "hold_ms": 2500})
+        # Réaction bien visible : grand sourire des yeux, ou tristesse, pendant 4 s.
+        if approved:
+            reaction = {"type": "eyes", "mood": "happy", "look": [0, 0], "pupil": 0.95,
+                        "wink": 1, "hold_ms": 4000}
+        else:
+            reaction = {"type": "eyes", "mood": "sad", "look": [0, 0.6], "pupil": 0.15,
+                        "blink": True, "hold_ms": 4000}
+        sent = await self.send_to_devices(reaction)
+        log("gesture_reaction", gesture=gesture, devices=sent)
 
     async def _on_recording(self, on: bool) -> None:
         log("live_view", watched=on)
@@ -275,9 +282,17 @@ class OpalBridge:
 
     async def _on_presence(self, present: bool) -> None:
         await self.send_to_devices({"type": "presence", "present": present})
-        who = self.cams.identity if present else None
         knows_faces = bool(self.cams.faces and self.cams.faces.people)
-        stranger = present and knows_faces and who == ""
+        who = None
+        if present and knows_faces:
+            # Jusqu'à 3 s pour être sûr : un visage connu gagne dès qu'il est reconnu,
+            # « inconnu » seulement après plusieurs analyses concordantes.
+            for _ in range(6):
+                who = self.cams.identity
+                if who or len(self.cams.votes) >= 4:
+                    break
+                await asyncio.sleep(0.5)
+        stranger = present and knows_faces and who == "" and len(self.cams.votes) >= 3
         if self.node is not None:
             event = "personne_arrivee" if present else "personne_partie"
             data: dict[str, object] = {"lieu": "devant Opal Box"}
