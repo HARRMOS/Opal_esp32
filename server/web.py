@@ -38,8 +38,8 @@ PAGE = """<!doctype html>
   document.getElementById("v").src = "/opal/cam/stream" + (hd ? "?hd=1" : "");
   document.getElementById(hd ? "net" : "fluide").classList.add("on");
   document.getElementById("info").textContent = hd
-    ? "Opal Box · direct net (640x480, environ 1 image/s)"
-    : "Opal Box · direct fluide (environ 3 images/s)";
+    ? "Opal Box · direct net (640x480, plus lent)"
+    : "Opal Box · direct fluide";
 </script></body></html>"""
 
 

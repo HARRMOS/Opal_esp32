@@ -143,8 +143,10 @@ class CameraHub:
         else:
             track = {"type": "cam", "fps": 4, "size": "qvga"}
             view = view_hd = {"type": "cam", "fps": 10, "size": "vga"}
-        if fps := os.environ.get("OPAL_CAM_FPS"):  # réglage manuel du suivi
+        if fps := os.environ.get("OPAL_CAM_FPS"):  # réglages manuels (alimentation dédiée…)
             track["fps"] = int(fps)
+        if fps := os.environ.get("OPAL_CAM_VIEW_FPS"):
+            view["fps"] = int(fps)
         mode = view_hd if self.viewers_hd else view if self.viewers else track
         await self._send(mode)
         watched = self.viewers > 0

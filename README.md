@@ -133,9 +133,11 @@ Bon à savoir sur la caméra :
   pas de JPEG matériel, l'ESP32 compresse lui-même. Le pont limite alors le flux à
   2 images/s pour le suivi et 3 images/s (QVGA) pour le direct : au-delà, son WiFi
   décroche. Un vrai OV2640 garde 4 et 10 images/s.
-- **Alimentation** : la broche 5V de l'ESP32-S3 N16R8 ne fournit pas de courant ;
-  en attendant une alimentation 5V dédiée (chargeur USB, 1 A), la caméra tourne sur
-  le 3V3 de l'S3.
+- **Alimentation** : la broche 5V de l'ESP32-S3 N16R8 ne fournit pas de courant.
+  Sur le 3V3 de l'S3, la caméra tient 2-3 images/s ; sur un 5V dédié (ici le 5V d'un
+  Arduino) elle tient ~8 images/s. Cadences réglables dans `deploy/opal-bridge.env`
+  sur le VPS : `OPAL_CAM_FPS` (suivi, 3 actuellement) et `OPAL_CAM_VIEW_FPS` (direct
+  fluide, 7 actuellement).
 - **Mises à jour par WiFi** (après le premier flash par fil), même réseau que le PC :
   `& "$env:USERPROFILE\.platformio\penv\Scripts\pio.exe" run -e cam-ota -t upload`
   (le pare-feu Windows doit autoriser Python sur le réseau).
