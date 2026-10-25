@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Gabarit de LaunchAgent macOS pour l'agent de verrouillage Opal.
+     Remplace __PYTHON__ par le chemin de python3 (which python3) et __SCRIPT__ par le
+     chemin de opal_guard.py, puis place ce fichier dans ~/Library/LaunchAgents/ et charge-le
+     avec : launchctl load ~/Library/LaunchAgents/pro.inoma.opal-guard.plist
+     (Le README donne une commande qui le génère automatiquement avec les bons chemins.) -->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>pro.inoma.opal-guard</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>__SCRIPT__</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>ProcessType</key><string>Interactive</string>
+    <key>StandardErrorPath</key><string>/tmp/opal-guard.log</string>
+    <key>StandardOutPath</key><string>/tmp/opal-guard.log</string>
+</dict>
+</plist>

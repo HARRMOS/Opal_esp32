@@ -36,9 +36,29 @@ on ne peut pas demander à Opal « déverrouille mon PC » par la voix.
 
 ## Installation (macOS)
 
-Même configuration (`python3 opal_guard.py --setup`), puis lance l'agent au login avec un
-LaunchAgent (`~/Library/LaunchAgents/pro.inoma.opal-guard.plist`) pointant sur
-`python3 .../opal_guard.py`. L'agent utilise le verrouillage natif macOS en secours.
+0. tkinter : `python3 -c "import tkinter"`. Si erreur : `brew install python-tk` (ou installe
+   Python depuis python.org, qui l'inclut).
+1. Récupère l'agent (par exemple depuis le VPS) dans `~/.opal_guard/` :
+   ```
+   mkdir -p ~/.opal_guard
+   scp ubuntu@51.210.177.60:/home/ubuntu/Opal_esp32/agent/opal_guard.py ~/.opal_guard/opal_guard.py
+   ```
+2. Configure (ton code reste masqué, jamais transmis) :
+   ```
+   python3 ~/.opal_guard/opal_guard.py --setup
+   ```
+3. Démarre au login via un LaunchAgent (génère le plist avec les bons chemins) :
+   ```
+   sed -e "s#__PYTHON__#$(which python3)#" -e "s#__SCRIPT__#$HOME/.opal_guard/opal_guard.py#" \
+     ~/.opal_guard/pro.inoma.opal-guard.plist > ~/Library/LaunchAgents/pro.inoma.opal-guard.plist
+   launchctl load ~/Library/LaunchAgents/pro.inoma.opal-guard.plist
+   ```
+   (copie d'abord `pro.inoma.opal-guard.plist` à côté du script, comme opal_guard.py.)
+
+Sur macOS, aucun programme ne peut non plus bloquer toutes les touches système : l'agent
+s'appuie sur le **verrouillage natif macOS** (écran de connexion, mot de passe exigé) dès
+qu'on tente de quitter l'écran de garde. Pour l'arrêter :
+`launchctl unload ~/Library/LaunchAgents/pro.inoma.opal-guard.plist`.
 
 ## Le jeton du gardien
 
