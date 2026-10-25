@@ -158,6 +158,7 @@ un GND relié au GND de l'S3. Au démarrage la tête se met au centre : c'est le
 visser le palonnier bien droit. Réglages dans [firmware/include/config.h](firmware/include/config.h) :
 `HEAD_PAN_INVERT` (tourne du mauvais côté), `HEAD_PAN_CENTER_US` (tête de travers),
 `HEAD_PAN_RANGE_US` (le servo force en bout de course).
+Test du servo seul (balayage gauche-droite, sans les yeux) : `-e servo-test` ; reflasher ensuite `-e opal-s3`.
 
 La tête suit le visage (les yeux font le reste), jette des coups d'œil quand personne
 n'est là, revient au centre la nuit, fait « non » sur un pouce baissé et se balance sur
