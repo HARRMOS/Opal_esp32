@@ -205,6 +205,13 @@ static void onText(const uint8_t* payload, size_t length) {
       eyes::lookAt(doc["x"] | 0.f, doc["y"] | 0.f);
       gazeUntil = millis() + GAZE_HOLD_MS;
     }
+  } else if (strcmp(type, "camera_fx") == 0) {  // Opal prend une photo
+    const char* phase = doc["phase"] | "";
+    if (strcmp(phase, "aim") == 0) eyes::cameraAim();
+    else if (strcmp(phase, "shoot") == 0) eyes::cameraShoot();
+    else eyes::cameraDone();
+  } else if (strcmp(type, "recording") == 0) {  // quelqu'un regarde le direct
+    eyes::setRecording(doc["on"] | false);
   } else if (strcmp(type, "presence") == 0) {
     personPresent = doc["present"] | true;
     if (personPresent) eyes::blink();  // réveil

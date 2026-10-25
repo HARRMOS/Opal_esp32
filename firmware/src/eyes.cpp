@@ -366,6 +366,105 @@ struct EyeFrame {
 };
 EyeFrame frame[2];
 
+// ---------------------------------------------------------------------------
+// Mode « appareil photo » : l'iris devient un objectif (diaphragme à 6 lamelles,
+// bague crantée), déclic + flash à la prise de vue, point rouge pendant le direct.
+// ---------------------------------------------------------------------------
+constexpr uint16_t GLASS_IN = rgb(6, 10, 28);
+constexpr uint16_t GLASS_OUT = rgb(52, 40, 120);
+constexpr uint16_t BLADE_A = rgb(46, 50, 62);
+constexpr uint16_t BLADE_B = rgb(34, 37, 47);
+constexpr uint16_t BLADE_LINE = rgb(14, 15, 20);
+constexpr uint16_t RING = rgb(24, 26, 32);
+constexpr uint16_t RING_TICK = rgb(150, 156, 170);
+constexpr uint16_t FLASH = rgb(255, 255, 255);
+constexpr uint16_t REC = rgb(235, 30, 40);
+constexpr int BLADES_OUT = IRIS_D * 84 / 100;  // au-delà : bague extérieure
+constexpr int REC_X = 178, REC_Y = 56, REC_R2 = 7 * 7;  // voyant sur l'œil droit
+
+uint16_t hexScale[ANG];  // bord d'un hexagone régulier selon l'angle (8.8)
+
+struct {
+  volatile int8_t request = -1;  // 0 visée, 1 déclic, 2 fin
+  volatile bool recording = false;
+  bool aiming = false;
+  float amount = 0;              // fondu œil -> objectif
+  uint32_t aimSince = 0, shootAt = 0, doneAt = 0;
+} lensAnim;
+
+struct {
+  int alpha = 0;     // 0..32 : part de l'objectif dans l'iris
+  int open2 = 0;     // rayon de l'ouverture du diaphragme (unités distance*2)
+  int rot = 0;       // rotation des lamelles (unités d'angle)
+  int ringRot = 0;   // rotation de la bague crantée
+  int flash = 0;     // 0..32
+  int rec = 0;       // 0..32 : intensité du voyant rouge (0 = éteint)
+} lens;
+
+void buildHexScale() {
+  for (int k = 0; k < ANG; k++) {
+    float th = fmodf(k * 2 * PI / ANG, PI / 3);
+    hexScale[k] = (uint16_t)(256 * cosf(PI / 6) / cosf(th - PI / 6));
+  }
+}
+
+void animateLens(uint32_t now, float dt) {
+  switch (lensAnim.request) {
+    case 0:
+      if (!lensAnim.aiming) lensAnim.aimSince = now;
+      lensAnim.aiming = true;
+      lensAnim.doneAt = 0;
+      break;
+    case 1:
+      lensAnim.aiming = true;
+      lensAnim.shootAt = now;
+      lensAnim.doneAt = now + 1500;  // fin automatique si le pont ne la demande pas
+      break;
+    case 2:
+      lensAnim.doneAt = now + 350;  // laisse finir le flash
+      break;
+  }
+  lensAnim.request = -1;
+  if (lensAnim.doneAt && (int32_t)(now - lensAnim.doneAt) >= 0) {
+    lensAnim.aiming = false;
+    lensAnim.doneAt = 0;
+  }
+  if (lensAnim.aiming && now - lensAnim.aimSince > 40000) lensAnim.aiming = false;  // sécurité
+
+  lensAnim.amount += ((lensAnim.aiming ? 1.f : 0.f) - lensAnim.amount) * min(1.f, dt * 6);
+  lens.alpha = (int)(lensAnim.amount * 32 + 0.5f);
+
+  // Mise au point : le diaphragme « respire » ; au déclic il se ferme puis se rouvre.
+  float open = 0.62f + 0.10f * sinf(now * 0.0055f) + 0.04f * sinf(now * 0.017f);
+  float flash = 0;
+  uint32_t t = lensAnim.shootAt ? now - lensAnim.shootAt : 100000;
+  if (t < 70) open *= 1 - t / 70.f;
+  else if (t < 120) open = 0;
+  else if (t < 300) open *= (t - 120) / 180.f;
+  if (t >= 70 && t < 520) flash = expf(-(t - 70) / 140.f);
+  lens.open2 = (int)(open * BLADES_OUT);
+  lens.rot = (int)((1 - open) * 40) & (ANG - 1);
+  lens.ringRot = (now / 18) & (ANG - 1);
+  lens.flash = (int)(flash * 32);
+
+  lens.rec = lensAnim.recording ? 14 + (int)(18 * (0.5f + 0.5f * sinf(now * 0.004f))) : 0;
+}
+
+// Couleur de l'objectif pour un point de l'iris (d2 = distance*2, a = angle).
+inline uint16_t lensPixel(int d2, int a) {
+  const int ka = (a + lens.rot) & (ANG - 1);
+  if (d2 >= BLADES_OUT) {  // bague crantée
+    return (((a + lens.ringRot) & 15) < 3) ? RING_TICK : RING;
+  }
+  if (d2 < ((lens.open2 * hexScale[ka]) >> 8)) {  // verre, au fond de l'ouverture
+    return blend565(GLASS_IN, GLASS_OUT, lens.open2 ? min(32, d2 * 32 / lens.open2) : 0);
+  }
+  const int pos = (ka * 6) & (ANG - 1);  // position dans la lamelle
+  if (pos < 12) return BLADE_LINE;
+  const uint16_t base = (((ka * 6) >> 8) & 1) ? BLADE_A : BLADE_B;
+  return scale565(base, 22 + (d2 * 10) / BLADES_OUT);
+}
+
 uint32_t frames = 0;  // compté par la tâche de l'œil gauche uniquement
 uint32_t fpsStart = 0;
 float fpsValue = 0;
@@ -448,11 +547,13 @@ void animate() {
   pupilTarget += 0.04f * sinf(now * 0.0007f) + 0.02f * sinf(now * 0.0023f);  // hippus
   anim.pupil += (pupilTarget - anim.pupil) * min(1.f, dt * 3);
 
+  animateLens(now, dt);
   float closed[2] = {blinkAmount(anim.blink[0], now), blinkAmount(anim.blink[1], now)};
+  const float lookAhead = 1 - lensAnim.amount;  // en mode objectif, les yeux visent droit devant
   for (int e = 0; e < 2; e++) {
     EyeFrame& f = frame[e];
-    float gx = constrain(anim.gx + 0.05f * INNER[e], -1.f, 1.f);  // légère convergence
-    float gy = constrain(anim.gy, -1.f, 1.f);
+    float gx = constrain((anim.gx + 0.05f * INNER[e]) * lookAhead, -1.f, 1.f);  // convergence
+    float gy = constrain(anim.gy * lookAhead, -1.f, 1.f);
     f.icx = CX + (int)lroundf(gx * GAZE_X_PX);
     f.icy = CY + (int)lroundf(gy * GAZE_Y_PX);
     f.sx = SCLERA_PAD + (int)(gx * 30);
@@ -523,6 +624,9 @@ void renderStrip(int e, int y0, uint16_t* out) {
     const int dh1 = y - hy1, dh2 = y - hy2;
     const int dh1sq = dh1 * dh1, dh2sq = dh2 * dh2;
     const uint32_t ditherRow = y & 1;
+    const int lensAlpha = lens.alpha, flash = lens.flash;
+    const int recDy = y - REC_Y;
+    const bool recRow = e == 1 && lens.rec && recDy * recDy < REC_R2;
 
     for (int x = x0; x < x1; x++) {
       const int dx = x - CX;
@@ -552,6 +656,7 @@ void renderStrip(int e, int y0, uint16_t* out) {
                 const int ring = ((d2 - f.pupil2) * f.ringScale) >> 8;
                 c = irisTex[(p & 0xFF) * RINGS + ring];
               }
+              if (lensAlpha) c = blend565(c, lensPixel(d2, p & 0xFF), lensAlpha);
             }
           }
         }
@@ -576,6 +681,11 @@ void renderStrip(int e, int y0, uint16_t* out) {
         // Bords des paupières lissés au sous-pixel (mouvements fluides).
         if (coverU > 0) c = blend565(c, RIM_UPPER, coverU * 2);
         if (coverL > 0) c = blend565(c, RIM_LOWER, coverL * 2);
+      }
+      if (flash) c = blend565(c, FLASH, flash);
+      if (recRow) {  // voyant « on te filme », bord adouci
+        const int rdx = x - REC_X, d = rdx * rdx + recDy * recDy;
+        if (d < REC_R2) c = blend565(c, REC, d < 25 ? lens.rec : lens.rec * (REC_R2 - d) / 24);
       }
       o[x] = (uint16_t)((c >> 8) | (c << 8));  // ordre d'octets de l'écran
     }
@@ -639,6 +749,7 @@ void begin(IrisColor color) {
 
   uint32_t t0 = millis();
   buildShade();
+  buildHexScale();
   buildPolar();
   buildIrisFor(color);
   buildSclera();
@@ -677,6 +788,11 @@ void setPupil(float size) { anim.pupilOverride = size; }
 void setIrisColor(IrisColor color) {
   if (irisTex) buildIrisFor(color);
 }
+
+void cameraAim() { lensAnim.request = 0; }
+void cameraShoot() { lensAnim.request = 1; }
+void cameraDone() { lensAnim.request = 2; }
+void setRecording(bool on) { lensAnim.recording = on; }
 
 float fps() { return fpsValue; }
 

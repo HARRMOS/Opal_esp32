@@ -64,6 +64,13 @@ Touches : `n` neutre, `h` content, `s` triste, `a` fâché, `u` surpris,
 `z` endormi, `b` cligner, `w`/`q`/`x`/`d`/espace pour orienter le regard,
 `g` regard automatique, `p`/`P` pupille serrée/dilatée, `c` couleur d'iris.
 
+**Mode appareil photo** : quand Opal prend une photo, l'iris des deux yeux devient un
+objectif (diaphragme à 6 lamelles qui fait la mise au point, bague crantée), puis
+déclic et flash blanc à la prise de vue. Pendant que quelqu'un regarde le direct,
+un voyant rouge pulse sur l'œil droit. Démo : touches `f` (photo) et `r` (voyant).
+
+![Mode appareil photo](docs/eyes_camera_mode.png)
+
 Si l'image est parasitée, passer `EYE_SPI_HZ` à 40 MHz ; si les couleurs sont
 inversées, `EYE_INVERT` à `false` ; si un œil est tourné, `EYE_L/R_ROTATION`
 ([firmware/include/config.h](firmware/include/config.h)).

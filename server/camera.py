@@ -92,6 +92,8 @@ class CameraHub:
         self.new_frame = asyncio.Condition()
         self.viewers = 0
         self.viewers_hd = 0
+        self.on_recording: Callable[[bool], Awaitable[None]] | None = None
+        self._watched = False
         self._enhanced: bytes | None = None
         self._enhanced_at = 0.0
         self._snapshot: asyncio.Future[bytes] | None = None
@@ -145,6 +147,10 @@ class CameraHub:
             track["fps"] = int(fps)
         mode = view_hd if self.viewers_hd else view if self.viewers else track
         await self._send(mode)
+        watched = self.viewers > 0
+        if watched != self._watched and self.on_recording is not None:
+            self._watched = watched
+            await self.on_recording(watched)  # voyant rouge sur les yeux d'Opal Box
 
     def enhanced(self) -> bytes | None:
         """Dernière image améliorée pour le direct (calculée une fois par image)."""

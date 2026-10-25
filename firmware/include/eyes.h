@@ -21,6 +21,13 @@ void wink(int eye);  // clin d'œil : 0 = œil gauche, 1 = œil droit (vus de fa
 void setPupil(float size);      // 0 (serrée) .. 1 (dilatée) ; < 0 = selon l'humeur
 void setIrisColor(IrisColor color);
 
+// Mode « appareil photo » : l'iris devient un objectif qui fait la mise au point,
+// déclic + flash à la prise de vue, puis retour à l'œil normal.
+void cameraAim();
+void cameraShoot();
+void cameraDone();
+void setRecording(bool on);  // voyant rouge sur l'œil droit pendant le direct
+
 float fps();
 
 }  // namespace eyes

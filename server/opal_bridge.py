@@ -137,6 +137,7 @@ class OpalBridge:
         self._token = device_token
         self._devices: set[ServerConnection] = set()  # boîtiers avec yeux / haut-parleur
         self.cams = CameraHub(self._on_gaze, self._on_presence)
+        self.cams.on_recording = self._on_recording
         self.node: OpalNode | None = None
         self._node_stop: asyncio.TimerHandle | None = None
         self._last_gaze = 0.0
@@ -171,7 +172,20 @@ class OpalBridge:
             return (True, f"Yeux : {summary}.") if sent else (False, "Les yeux d'Opal Box ne sont pas connectés.")
         if tool == "opal_box_photo":
             question = str(args.get("question") or "Décris ce que tu vois.")
-            jpeg, full = await self.cams.snapshot(flash=bool(args.get("flash")))
+            # Les yeux deviennent un objectif pendant la visée, puis déclic + flash.
+            await self.send_to_devices({"type": "camera_fx", "phase": "aim"})
+            try:
+                jpeg, full = await self.cams.snapshot(flash=bool(args.get("flash")))
+            except Exception:
+                await self.send_to_devices({"type": "camera_fx", "phase": "done"})
+                raise
+            await self.send_to_devices({"type": "camera_fx", "phase": "shoot"})
+            asyncio.get_running_loop().call_later(
+                0.9,
+                lambda: asyncio.ensure_future(
+                    self.send_to_devices({"type": "camera_fx", "phase": "done"})
+                ),
+            )
             photo_id = self.cams.keep_photo(jpeg)
             log("photo", bytes=len(jpeg), full=full, id=photo_id)
             description = await vision.describe(jpeg, question)
@@ -190,6 +204,10 @@ class OpalBridge:
         if now - self._last_gaze >= GAZE_MIN_INTERVAL_S:
             self._last_gaze = now
             await self.send_to_devices({"type": "gaze", "x": round(x, 3), "y": round(y, 3)})
+
+    async def _on_recording(self, on: bool) -> None:
+        log("live_view", watched=on)
+        await self.send_to_devices({"type": "recording", "on": on})
 
     async def _on_presence(self, present: bool) -> None:
         await self.send_to_devices({"type": "presence", "present": present})
@@ -277,6 +295,8 @@ class OpalBridge:
         await self._send(ws, type="state", value="idle")
         if self.cams.online:
             await self._send(ws, type="presence", present=self.cams.present)
+        if self.cams.viewers:
+            await self._send(ws, type="recording", on=True)
         audio = bytearray()
         recording = False
         try:

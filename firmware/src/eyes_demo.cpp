@@ -2,6 +2,7 @@
 // depuis le moniteur série :
 //   n neutre   h content   s triste   a fâché   u surpris   z endormi
 //   b cligner  k/l clin d'œil gauche/droit  g regard auto   p/P pupille serrée/dilatée   c couleur d'iris
+//   f prise de photo (objectif, déclic, flash)   r voyant « direct » marche/arrêt
 //   w q x d + espace : regarder haut/gauche/bas/droite, centre
 
 #include <Arduino.h>
@@ -13,6 +14,7 @@ static const char* const MOOD_NAMES[] = {"neutre", "content", "triste",
 static bool cycle = true;
 static uint32_t nextMood = 0;
 static int mood = 0;
+static uint32_t photoAt = 0;  // démo « f » : visée 1,5 s puis déclic
 
 static void handleSerial() {
   if (!Serial.available()) return;
@@ -37,6 +39,16 @@ static void handleSerial() {
     case 'q': eyes::lookAt(-0.8f, 0); break;
     case 'd': eyes::lookAt(0.8f, 0); break;
     case ' ': eyes::lookAt(0, 0); break;
+    case 'f':
+      photoAt = millis();
+      eyes::cameraAim();
+      break;
+    case 'r': {
+      static bool rec = false;
+      rec = !rec;
+      eyes::setRecording(rec);
+      break;
+    }
     case 'c': {
       static int color = 0;
       color = (color + 1) % 5;
@@ -56,6 +68,10 @@ void setup() {
 void loop() {
   handleSerial();
   delay(5);
+  if (photoAt && millis() - photoAt > 1500) {  // même enchaînement que le pont
+    photoAt = 0;
+    eyes::cameraShoot();
+  }
 
   uint32_t now = millis();
   if (cycle && now >= nextMood) {
