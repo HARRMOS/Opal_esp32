@@ -122,6 +122,13 @@ class IrisClient:
             timeout=IRIS_TIMEOUT_S + 10,
         )
 
+    async def confirm(self, confirm_id: str, approved: bool) -> bool:
+        """Répond à une demande de confirmation d'Opal (comme le bouton de son interface)."""
+        response = await self._client.post(
+            "/api/confirm", json={"id": confirm_id, "approved": approved}
+        )
+        return response.status_code == HTTPStatus.OK
+
     async def briefing(self) -> str:
         """Briefing du jour d'Opal (météo, agenda, mails) ; s'affiche aussi dans son chat."""
         response = await self._client.post("/api/briefing")
@@ -152,6 +159,7 @@ class OpalBridge:
         self._devices: set[ServerConnection] = set()  # boîtiers avec yeux / haut-parleur
         self.cams = CameraHub(self._on_gaze, self._on_presence)
         self.cams.on_recording = self._on_recording
+        self.cams.on_gesture = self._on_gesture
         self.node: OpalNode | None = None
         self._node_stop: asyncio.TimerHandle | None = None
         self._last_gaze = 0.0
@@ -241,6 +249,25 @@ class OpalBridge:
         if now - self._last_gaze >= GAZE_MIN_INTERVAL_S:
             self._last_gaze = now
             await self.send_to_devices({"type": "gaze", "x": round(x, 3), "y": round(y, 3)})
+
+    async def _on_gesture(self, gesture: str) -> None:
+        """Main ouverte : coucou. Pouce levé / baissé : répond à la confirmation en attente."""
+        self._last_activity = time.monotonic()
+        await self.update_sleep()
+        if self.node is not None:
+            await self.node.send_event("geste", {"geste": gesture.replace("_", " ")})
+        if gesture == "main_ouverte":
+            await self.send_to_devices({"type": "eyes", "mood": "happy", "wink": 1, "look": [0, 0],
+                                        "hold_ms": 2500})
+            return
+        approved = gesture == "pouce_haut"
+        if self.pending_confirmation:
+            ok = await self._iris.confirm(self.pending_confirmation, approved)
+            log("gesture_confirm", approved=approved, ok=ok)
+            if ok:
+                self.pending_confirmation = None
+        await self.send_to_devices({"type": "eyes", "mood": "happy" if approved else "sad",
+                                    "blink": True, "hold_ms": 2500})
 
     async def _on_recording(self, on: bool) -> None:
         log("live_view", watched=on)

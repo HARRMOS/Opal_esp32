@@ -23,6 +23,7 @@ import cv2
 import numpy as np
 
 from faces import FaceBook
+from gestures import GestureDetector
 from logs import log
 
 FRAME, SNAPSHOT = 1, 2
@@ -30,7 +31,12 @@ PRESENCE_ARRIVE_HITS = 3     # visages vus sur les 5 dernières analyses pour «
 PRESENCE_LEAVE_S = 45.0      # plus de visage depuis ce délai = « départ »
 GAZE_HOLD_S = 1.2
 MAX_PHOTOS = 50
+GESTURE_COOLDOWN_S = 4.0
 
+
+# Petites images, plusieurs analyses par seconde : un seul thread OpenCV coûte bien moins
+# cher (sinon chaque calcul est éparpillé sur tous les cœurs du VPS partagé).
+cv2.setNumThreads(1)
 
 _CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
@@ -125,6 +131,16 @@ class CameraHub:
         self._votes: deque[str] = deque(maxlen=5)  # derniers noms reconnus ("" = inconnu)
         self._last_identify = 0.0
         self._enrolling: dict[str, Any] | None = None
+        # Gestes de la main (facultatif : sans les modèles, la caméra s'en passe).
+        try:
+            self.gestures: GestureDetector | None = GestureDetector()
+        except cv2.error as exc:
+            log("gestures_disabled", error=str(exc)[:120])
+            self.gestures = None
+        self.on_gesture: Callable[[str], Awaitable[None]] | None = None
+        self._last_gesture: str | None = None
+        self._gesture_at = 0.0
+        self._gesture_check = 0.0
 
     @property
     def online(self) -> bool:
@@ -250,17 +266,40 @@ class CameraHub:
             self._analyzing = True
             asyncio.create_task(self._analyze(jpeg))
 
-    def _detect(self, jpeg: bytes) -> tuple[Face | None, tuple[str, float] | None]:
+    def _detect(self, jpeg: bytes) -> tuple[Face | None, tuple[str, float] | None, str | None]:
         face = self._tracker.find(jpeg)
-        return face, (self._identify(face) if face is not None else None)
+        who = self._identify(face) if face is not None else None
+        gesture = None
+        # Un geste suppose quelqu'un devant la caméra ; au plus 2 analyses par seconde.
+        now = time.time()
+        if self.gestures is not None and self.present and now - self._gesture_check > 0.5:
+            self._gesture_check = now
+            img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+            if img is not None:
+                gesture = self.gestures.detect(img)
+        return face, who, gesture
+
+    async def _on_gesture_seen(self, gesture: str | None) -> None:
+        """Geste confirmé s'il est vu deux fois de suite ; 4 s de pause entre deux gestes."""
+        previous, self._last_gesture = self._last_gesture, gesture
+        if gesture is None or gesture != previous or self.on_gesture is None:
+            return
+        now = time.time()
+        if now - self._gesture_at < GESTURE_COOLDOWN_S:
+            return
+        self._gesture_at = now
+        self._last_gesture = None
+        log("gesture", gesture=gesture)
+        await self.on_gesture(gesture)
 
     async def _analyze(self, jpeg: bytes) -> None:
         try:
-            face, who = await asyncio.to_thread(self._detect, jpeg)
+            face, who, gesture = await asyncio.to_thread(self._detect, jpeg)
         finally:
             self._analyzing = False
         now = time.time()
         self._hits.append(face is not None)
+        await self._on_gesture_seen(gesture)
         if who is not None:
             self._votes.append(who[0])
         enrolling = self._enrolling

@@ -22,6 +22,15 @@ RUN curl -fsSL -o face_recognition_sface.onnx \
       https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx \
  && echo "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79  face_recognition_sface.onnx" \
       | sha256sum -c -
+# Gestes : détection de la paume + points de la main (MediaPipe, opencv_zoo), empreintes vérifiées
+RUN curl -fsSL -o palm_detection_mediapipe.onnx \
+      https://github.com/opencv/opencv_zoo/raw/main/models/palm_detection_mediapipe/palm_detection_mediapipe_2023feb.onnx \
+ && curl -fsSL -o handpose_estimation_mediapipe.onnx \
+      https://github.com/opencv/opencv_zoo/raw/main/models/handpose_estimation_mediapipe/handpose_estimation_mediapipe_2023feb.onnx \
+ && printf "%s  %s\n%s  %s\n" \
+      78ff51c38496b7fc8b8ebdb6cc8c1abb02fa6c38427c6848254cdaba57fcce7c palm_detection_mediapipe.onnx \
+      db0898ae717b76b075d9bf563af315b29562e11f8df5027a1ef07b02bef6d81c handpose_estimation_mediapipe.onnx \
+      | sha256sum -c -
 
 USER opal
 # Claude Code décrit les photos avec l'abonnement Claude (CLAUDE_CODE_OAUTH_TOKEN).
@@ -30,5 +39,6 @@ ENV PATH=/home/opal/.local/bin:$PATH \
     DISABLE_AUTOUPDATER=1
 
 COPY *.py ./
+COPY vendor ./vendor
 EXPOSE 8766 8767
 CMD ["python", "opal_bridge.py"]
