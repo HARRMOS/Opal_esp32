@@ -46,7 +46,7 @@ const hd = new URLSearchParams(location.search).has("hd");
 const v = document.getElementById("v");
 v.src = "/opal/cam/stream" + (hd ? "?hd=1" : "");
 document.getElementById(hd ? "net" : "fluide").classList.add("on");
-const GESTES = { pouce_haut: "👍 pouce levé", pouce_bas: "👎 pouce baissé", main_ouverte: "✋ main ouverte" };
+const GESTES = { pouce_haut: "👍 pouce levé", pouce_bas: "👎 pouce baissé", main_ouverte: "✋ main ouverte", ok: "👌 OK", bras_croises: "❌ bras croisés" };
 
 function draw(s) {
   const who = document.getElementById("who");
@@ -182,7 +182,10 @@ function stop() {
 go.onclick = () => (running ? stop() : start());
 // Vision d'Opal par-dessus l'aperçu : ce que le VPS détecte (visage, main, geste).
 const ov = document.getElementById("ov"), octx = ov.getContext("2d");
-const GESTES = { pouce_haut: "Pouce levé", pouce_bas: "Pouce baissé", main_ouverte: "Main ouverte" };
+const GESTES = { pouce_haut: "Pouce levé", pouce_bas: "Pouce baissé", main_ouverte: "Main ouverte",
+  ok: "👌 OK", bras_croises: "Bras croisés" };
+// Bras : épaules, coudes, poignets (gauche/droite de la personne)
+const ARM_LINKS = [[0,1],[0,2],[2,4],[1,3],[3,5]];
 const LINKS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
   [9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
 const mirrored = () => !v.classList.contains("back");
@@ -232,6 +235,17 @@ function drawVision(s) {
     for (const q of p) { octx.beginPath(); octx.arc(q[0], q[1], Math.max(2.5, ov.width / 200), 0, 7); octx.fill(); }
     const top = Math.min(...p.map((q) => q[1])), left = Math.min(...p.map((q) => q[0]));
     tag(GESTES[s.hand.gesture] || "Main", left, top, "#5aa9ff");
+  }
+  if (fresh(s.arms) && (s.arms.arms || []).length === 6) {
+    const p = s.arms.arms.map(([qx, qy, vis]) => [px(qx), qy * H, vis]);
+    const crossed = s.arms.gesture === "bras_croises", color = crossed ? "#f2a24a" : "#b48cff";
+    octx.strokeStyle = color; octx.lineWidth = Math.max(3, ov.width / 160); octx.beginPath();
+    for (const [a, b] of ARM_LINKS) {
+      if (p[a][2] < 0.5 || p[b][2] < 0.5) continue;
+      octx.moveTo(p[a][0], p[a][1]); octx.lineTo(p[b][0], p[b][1]);
+    }
+    octx.stroke();
+    if (crossed) tag("Bras croisés", Math.min(p[4][0], p[5][0]), Math.min(p[4][1], p[5][1]), color);
   }
   let state = !s.present ? "Personne" : s.who ? `${s.who} est là` : s.who === "" ? "Inconnu" : "Quelqu'un est là";
   const last = s.last_gesture;

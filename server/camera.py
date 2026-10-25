@@ -25,6 +25,7 @@ import numpy as np
 import hud
 from faces import FaceBook
 from gestures import GestureDetector
+from pose import PoseDetector
 from logs import log
 
 FRAME, SNAPSHOT = 1, 2
@@ -34,7 +35,7 @@ GAZE_HOLD_S = 1.2
 MAX_PHOTOS = 50
 GESTURE_COOLDOWN_S = 4.0
 # Vues consécutives exigées (≈ 3 par seconde) : le « coucou » doit être tenu ~1 s.
-GESTURE_CONFIRM = {"main_ouverte": 3, "pouce_haut": 2, "pouce_bas": 2}
+GESTURE_CONFIRM = {"main_ouverte": 3, "pouce_haut": 2, "pouce_bas": 2, "ok": 2, "bras_croises": 2}
 GESTURE_STILL = 0.12  # déplacement max de la main entre deux vues (fraction de l image)
 
 
@@ -101,6 +102,30 @@ class FaceTracker:
                     points)
 
 
+class GestureTrack:
+    """Un geste n'est retenu que vu plusieurs fois de suite au même endroit."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.last: str | None = None
+        self.streak = 0
+        self.center: tuple[float, float] | None = None
+
+    def feed(self, gesture: str | None, center: tuple[float, float] | None) -> bool:
+        moved = (
+            center is None or self.center is None
+            or abs(center[0] - self.center[0]) + abs(center[1] - self.center[1]) > GESTURE_STILL
+        )
+        self.center = center
+        if gesture is None or gesture != self.last or moved:
+            self.last, self.streak = gesture, 1
+            return False
+        self.streak += 1
+        return self.streak >= GESTURE_CONFIRM.get(gesture, 2)
+
+
 @dataclass
 class Face:
     cx: float
@@ -159,10 +184,14 @@ class CameraHub:
             log("gestures_disabled", error=str(exc)[:120])
             self.gestures = None
         self.on_gesture: Callable[[str], Awaitable[None]] | None = None
-        self._last_gesture: str | None = None
-        self._gesture_streak = 0
-        self._gesture_center: tuple[float, float] | None = None
+        self._hand_track, self._arm_track = GestureTrack(), GestureTrack()
         self._gesture_at = 0.0
+        self._pose_check = 0.0
+        try:
+            self.poses: PoseDetector | None = PoseDetector()
+        except cv2.error as exc:
+            log("poses_disabled", error=str(exc)[:120])
+            self.poses = None
         self._gesture_check = 0.0
         self._last_score: float | None = None
         self.seen: dict[str, Any] = {}  # dernières détections, pour la page du direct
@@ -340,48 +369,46 @@ class CameraHub:
             self._analyzing = True
             asyncio.create_task(self._analyze(jpeg))
 
-    def _detect(self, jpeg: bytes) -> tuple[Face | None, tuple[str, float] | None, Any]:
-        """Visage, identité, et main : (geste, boîte) si la main a été cherchée, sinon None."""
+    def _detect(self, jpeg: bytes) -> tuple[Face | None, tuple[str, float] | None, Any, Any]:
+        """Visage, identité, main et bras. Main / bras : (geste, vu) s'ils ont été cherchés
+        sur cette image, sinon None."""
         face = self._tracker.find(jpeg)
         who = self._identify(face) if face is not None else None
-        hand = None
-        # Un geste suppose quelqu'un devant la caméra ; au plus 3 recherches de main par seconde.
+        hand = arms = None
+        # Un geste suppose quelqu'un devant la caméra : main 3 fois/s, bras 2 fois/s au plus.
         now = time.time()
-        if self.gestures is not None and self.present and now - self._gesture_check > 0.33:
-            self._gesture_check = now
+        want_hand = self.gestures is not None and self.present and now - self._gesture_check > 0.33
+        want_arms = self.poses is not None and self.present and now - self._pose_check > 0.5
+        if want_hand or want_arms:
             img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
-            if img is not None:
+            if img is not None and want_hand:
+                self._gesture_check = now
                 hand = self.gestures.detect(img)
-        return face, who, hand
+            if img is not None and want_arms:
+                self._pose_check = now
+                arms = self.poses.detect(img)
+        return face, who, hand, arms
 
-    async def _on_gesture_seen(self, gesture: str | None, box: Any = None) -> None:
-        """Geste confirmé s'il est vu plusieurs fois de suite, main immobile (une main qui
-        passe devant la caméra ne compte pas) ; 4 s de pause entre deux gestes."""
-        center = (box[0] + box[2] / 2, box[1] + box[3] / 2) if box else None
-        moved = (
-            center is None or self._gesture_center is None
-            or abs(center[0] - self._gesture_center[0]) + abs(center[1] - self._gesture_center[1])
-            > GESTURE_STILL
-        )
-        self._gesture_center = center
-        if gesture is None or gesture != self._last_gesture or moved:
-            self._last_gesture, self._gesture_streak = gesture, 1
-            return
-        self._gesture_streak += 1
-        if self._gesture_streak < GESTURE_CONFIRM.get(gesture, 2) or self.on_gesture is None:
+    async def _on_gesture_seen(
+        self, gesture: str | None, center: tuple[float, float] | None, track: GestureTrack | None = None
+    ) -> None:
+        """Geste confirmé s'il est vu plusieurs fois de suite, immobile (une main qui passe
+        devant la caméra ne compte pas) ; 4 s de pause entre deux gestes."""
+        track = track or self._hand_track
+        if not track.feed(gesture, center) or self.on_gesture is None:
             return
         now = time.time()
         if now - self._gesture_at < GESTURE_COOLDOWN_S:
             return
         self._gesture_at = now
-        self._last_gesture, self._gesture_streak = None, 0
+        track.reset()
         log("gesture", gesture=gesture)
         self.seen["last_gesture"] = {"name": gesture, "at": now}
         await self.on_gesture(gesture)
 
     async def _analyze(self, jpeg: bytes) -> None:
         try:
-            face, who, hand = await asyncio.to_thread(self._detect, jpeg)
+            face, who, hand, arms = await asyncio.to_thread(self._detect, jpeg)
         finally:
             self._analyzing = False
         now = time.time()
@@ -397,7 +424,15 @@ class CameraHub:
             gesture, seen_hand = hand
             if seen_hand:
                 self.seen["hand"] = {**seen_hand, "gesture": gesture, "at": now}
-            await self._on_gesture_seen(gesture, seen_hand["box"] if seen_hand else None)
+            box = seen_hand["box"] if seen_hand else None
+            await self._on_gesture_seen(gesture, (box[0] + box[2] / 2, box[1] + box[3] / 2) if box else None)
+        if arms is not None:  # les bras ont été cherchés sur cette image
+            gesture, seen_arms = arms
+            if seen_arms:
+                self.seen["arms"] = {**seen_arms, "gesture": gesture, "at": now}
+            wrists = seen_arms["arms"][4:6] if seen_arms else None
+            center = ((wrists[0][0] + wrists[1][0]) / 2, (wrists[0][1] + wrists[1][1]) / 2) if wrists else None
+            await self._on_gesture_seen(gesture, center, self._arm_track)
         enrolling = self._enrolling
         if enrolling and len(enrolling["embs"]) >= enrolling["want"] and not enrolling["done"].done():
             enrolling["done"].set_result(list(enrolling["embs"]))

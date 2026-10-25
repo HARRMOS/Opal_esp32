@@ -92,6 +92,21 @@ GREETING_NAMED_PROMPT = (
     "[Opal Box] Ta caméra vient de reconnaître {name}, qui arrive devant toi. "
     "Salue-le par son prénom en une phrase courte et naturelle, sans poser de question."
 )
+# Gestes musique : 👌 lance la playlist, bras croisés en X mettent en pause (via Opal).
+MUSIC_PLAYLIST = os.environ.get(
+    "OPAL_PLAYLIST_URL", "https://youtube.com/playlist?list=PLZ9izpm7vI-g&si=AwEQDdFe-6q8TVlu"
+)
+MUSIC_MACHINE = os.environ.get("OPAL_MUSIC_MACHINE", "mon PC")
+MUSIC_PROMPTS = {
+    "ok": (
+        "[Opal Box] Geste 👌 devant ta caméra : lance tout de suite ma playlist YouTube "
+        "{playlist} sur {machine}, en lecture. Ne pose pas de question, réponds en une phrase."
+    ),
+    "bras_croises": (
+        "[Opal Box] Bras croisés en X devant ta caméra : mets la musique en pause sur "
+        "{machine} (touche lecture/pause). Ne pose pas de question, réponds en une phrase."
+    ),
+}
 
 _MARKDOWN = re.compile(r"```[\s\S]*?```|`([^`]*)`|\*\*([^*]+)\*\*|^#{1,6}\s+|^\s*[-•*]\s+", re.M)
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
@@ -272,6 +287,17 @@ class OpalBridge:
                                         "hold_ms": 2500})
             await self.send_to_devices({"type": "head", "gesture": "wiggle"})
             return
+        if gesture in MUSIC_PROMPTS:
+            play = gesture == "ok"
+            await self.send_to_devices(
+                {"type": "eyes", "mood": "happy", "wink": 1, "look": [0, 0], "hold_ms": 3000}
+                if play else {"type": "eyes", "mood": "neutral", "blink": True, "look": [0, 0],
+                              "hold_ms": 2000}
+            )
+            if play:
+                await self.send_to_devices({"type": "head", "gesture": "wiggle"})
+            asyncio.create_task(self._music(gesture))
+            return
         approved = gesture == "pouce_haut"
         if self.pending_confirmation:
             ok = await self._iris.confirm(self.pending_confirmation, approved)
@@ -289,6 +315,16 @@ class OpalBridge:
         # Le cou suit : balancement content, ou « non » de la tête.
         await self.send_to_devices({"type": "head", "gesture": "wiggle" if approved else "shake"})
         log("gesture_reaction", gesture=gesture, devices=sent)
+
+    async def _music(self, gesture: str) -> None:
+        prompt = MUSIC_PROMPTS[gesture].format(playlist=MUSIC_PLAYLIST, machine=MUSIC_MACHINE)
+        try:
+            answer = await self._iris.ask(prompt)
+        except Exception as exc:
+            log("music_failed", gesture=gesture, error=str(exc))
+            await self.send_to_devices({"type": "eyes", "mood": "sad", "hold_ms": 2500})
+            return
+        log("music", gesture=gesture, text=answer[:200])
 
     async def _on_recording(self, on: bool) -> None:
         log("live_view", watched=on)

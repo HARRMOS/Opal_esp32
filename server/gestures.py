@@ -6,6 +6,9 @@ vendor/), puis reconnaissance par la géométrie des doigts :
     main_ouverte  les cinq doigts tendus      → coucou : la boîte se réveille
     pouce_haut    pouce tendu vers le haut    → valide la confirmation d'Opal en attente
     pouce_bas     pouce tendu vers le bas     → la refuse
+    ok            👌 pouce contre index       → lance la playlist (voir opal_bridge)
+
+Les bras croisés (pause de la musique) sont dans pose.py.
 """
 
 from __future__ import annotations
@@ -46,6 +49,11 @@ def classify(points: np.ndarray) -> str | None:
     spread = float(np.mean(np.linalg.norm(np.diff(tips, axis=0), axis=1))) > 0.28 * size
     if straight and upright and spread and thumb_out:
         return "main_ouverte"
+    # 👌 : bout du pouce contre le bout de l'index (cercle), les trois autres doigts tendus.
+    circle = np.linalg.norm(pts[4] - pts[8]) < 0.35 * size
+    others_up = all(far(tip) > far(pip) * 1.12 for pip, tip in _FINGERS[1:])
+    if circle and others_up:
+        return "ok"
     if all(extended):
         return None  # main ouverte mais pas un vrai « coucou »
     if all(folded) and thumb_out:

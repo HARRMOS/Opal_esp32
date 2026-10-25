@@ -31,6 +31,15 @@ RUN curl -fsSL -o palm_detection_mediapipe.onnx \
       78ff51c38496b7fc8b8ebdb6cc8c1abb02fa6c38427c6848254cdaba57fcce7c palm_detection_mediapipe.onnx \
       db0898ae717b76b075d9bf563af315b29562e11f8df5027a1ef07b02bef6d81c handpose_estimation_mediapipe.onnx \
       | sha256sum -c -
+# Bras croisés : détection de la personne + points du corps (MediaPipe, opencv_zoo), empreintes vérifiées
+RUN curl -fsSL -o person_detection_mediapipe.onnx \
+      https://github.com/opencv/opencv_zoo/raw/main/models/person_detection_mediapipe/person_detection_mediapipe_2023mar.onnx \
+ && curl -fsSL -o pose_estimation_mediapipe.onnx \
+      https://github.com/opencv/opencv_zoo/raw/main/models/pose_estimation_mediapipe/pose_estimation_mediapipe_2023mar.onnx \
+ && printf "%s  %s\n%s  %s\n" \
+      47fd5599d6fa17608f03e0eb0ae230baa6e597d7e8a2c8199fe00abea55a701f person_detection_mediapipe.onnx \
+      9d89c599319a18fb7d2e28451a883476164543182bafca5f09eb2cf767ed2f3f pose_estimation_mediapipe.onnx \
+      | sha256sum -c -
 
 USER opal
 # Claude Code décrit les photos avec l'abonnement Claude (CLAUDE_CODE_OAUTH_TOKEN).

@@ -18,12 +18,16 @@ from PIL import Image, ImageDraw, ImageFont
 FRESH_S = 0.8  # au-delà, une détection n'est plus dessinée
 
 GREEN, ORANGE, GREY, BLUE = (79, 209, 139), (242, 162, 74), (154, 166, 189), (90, 169, 255)
-GESTURES = {"pouce_haut": "Pouce levé", "pouce_bas": "Pouce baissé", "main_ouverte": "Main ouverte"}
+GESTURES = {"pouce_haut": "Pouce levé", "pouce_bas": "Pouce baissé", "main_ouverte": "Main ouverte",
+            "ok": "Signe OK", "bras_croises": "Bras croisés"}
+PURPLE = (180, 140, 255)
 # Liaisons des 21 points de la main (MediaPipe) : poignet, pouce, index, majeur, annulaire, auriculaire
 HAND_LINKS = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (5, 9), (9, 10),
               (10, 11), (11, 12), (9, 13), (13, 14), (14, 15), (15, 16), (13, 17), (0, 17),
               (17, 18), (18, 19), (19, 20)]
 FINGER_TIPS = (4, 8, 12, 16, 20)
+# Bras (pose.py) : épaules 0/1, coudes 2/3, poignets 4/5
+ARM_LINKS = [(0, 1), (0, 2), (2, 4), (1, 3), (3, 5)]
 
 _FONTS = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -103,6 +107,18 @@ def draw(img: np.ndarray, info: dict[str, Any]) -> np.ndarray:
         x, y = hand["box"][:2]
         gesture = GESTURES.get(hand.get("gesture") or "", "Main")
         labels.append((gesture, int(x * w), int(y * h), BLUE))
+
+    arms = info.get("arms")
+    if arms and now - arms.get("at", 0) < FRESH_S and len(arms.get("arms") or []) == 6:
+        pts = [(int(x * w), int(y * h), vis) for x, y, vis in arms["arms"]]
+        crossed = arms.get("gesture") == "bras_croises"
+        color = (ORANGE if crossed else PURPLE)[::-1]
+        for a, b in ARM_LINKS:
+            if pts[a][2] >= 0.5 and pts[b][2] >= 0.5:
+                cv2.line(img, pts[a][:2], pts[b][:2], color, t + 1, cv2.LINE_AA)
+        if crossed:
+            labels.append((GESTURES["bras_croises"], min(pts[4][0], pts[5][0]),
+                           min(pts[4][1], pts[5][1]), ORANGE))
 
     # Bandeau d'état en haut à gauche.
     who = info.get("who")
