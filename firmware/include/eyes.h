@@ -27,6 +27,7 @@ void cameraAim();
 void cameraShoot();
 void cameraDone();
 void setRecording(bool on);  // voyant rouge sur l'œil droit pendant le direct
+void setAsleep(bool asleep); // paupières closes + écran assombri (la nuit)
 
 float fps();
 

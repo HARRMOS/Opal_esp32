@@ -210,6 +210,8 @@ static void onText(const uint8_t* payload, size_t length) {
     if (strcmp(phase, "aim") == 0) eyes::cameraAim();
     else if (strcmp(phase, "shoot") == 0) eyes::cameraShoot();
     else eyes::cameraDone();
+  } else if (strcmp(type, "sleep") == 0) {  // la nuit, sans personne devant la caméra
+    eyes::setAsleep(doc["on"] | false);
   } else if (strcmp(type, "recording") == 0) {  // quelqu'un regarde le direct
     eyes::setRecording(doc["on"] | false);
   } else if (strcmp(type, "presence") == 0) {

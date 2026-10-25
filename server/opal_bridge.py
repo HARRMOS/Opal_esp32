@@ -56,6 +56,7 @@ import os
 import re
 import sys
 import time
+from datetime import date
 from http import HTTPStatus
 from pathlib import Path
 
@@ -69,6 +70,7 @@ from aiohttp import web
 import vision
 from activity import OpalActivity
 from camera import CameraHub
+from rhythm import DayRhythm
 from logs import log
 from node import OpalNode, eyes_command
 from voice import MIC_RATE, TTS_RATE, Speaker, Transcriber
@@ -81,6 +83,7 @@ MAX_SPOKEN_CHARS = 600
 IRIS_TIMEOUT_S = 180
 GAZE_MIN_INTERVAL_S = 0.1
 NODE_GRACE_S = 30.0
+AWAKE_AFTER_ACTIVITY_S = 120.0  # la nuit, reste éveillée 2 min après une activité
 GREETING_PROMPT = (
     "[Opal Box] Quelqu'un vient d'apparaître devant ta caméra. "
     "Salue-le en une phrase courte et naturelle, sans poser de question."
@@ -115,6 +118,12 @@ class IrisClient:
             timeout=IRIS_TIMEOUT_S + 10,
         )
 
+    async def briefing(self) -> str:
+        """Briefing du jour d'Opal (météo, agenda, mails) ; s'affiche aussi dans son chat."""
+        response = await self._client.post("/api/briefing")
+        response.raise_for_status()
+        return str((response.json().get("briefing") or {}).get("text") or "")
+
     async def ask(self, text: str) -> str:
         response = await self._client.post(
             "/api/command", json={"text": text, "timeout": IRIS_TIMEOUT_S}
@@ -146,6 +155,10 @@ class OpalBridge:
         self._greet = os.environ.get("OPAL_GREET", "1") == "1"
         self._public_url = os.environ.get("OPAL_PUBLIC_URL", "https://iris.inoma.pro").rstrip("/")
         self.pending_confirmation: str | None = None  # validable d'un pouce levé
+        self.rhythm = DayRhythm()
+        self._asleep = False
+        self._last_activity = 0.0
+        self._briefing_day: date | None = None
 
     def set_pending_confirmation(self, confirm_id: str | None) -> None:
         self.pending_confirmation = confirm_id
@@ -219,10 +232,52 @@ class OpalBridge:
         if self.node is not None:
             event = "personne_arrivee" if present else "personne_partie"
             await self.node.send_event(event, {"lieu": "devant Opal Box"})
+        await self.update_sleep()
+        if not present:
+            return
+        # Première arrivée du matin : le briefing remplace la salutation.
+        if self.rhythm.is_morning() and self._briefing_day != self.rhythm.today():
+            self._briefing_day = self.rhythm.today()
+            asyncio.create_task(self._morning_briefing())
+            return
         now = time.monotonic()
-        if present and self._greet and self._devices and now - self._last_greeting > self._greet_cooldown:
+        if self._greet and self._devices and now - self._last_greeting > self._greet_cooldown:
             self._last_greeting = now
             asyncio.create_task(self._greet_visitor())
+
+    async def _morning_briefing(self) -> None:
+        try:
+            text = await self._iris.briefing()
+        except Exception as exc:
+            log("briefing_failed", error=str(exc))
+            return
+        log("briefing", chars=len(text))
+        for ws in list(self._devices):
+            await self._speak(ws, text)
+            await self._send(ws, type="state", value="idle")
+
+    async def note_activity(self, cmd: dict[str, object]) -> int:
+        """Expression venue de l'activité d'Opal : réveille la boîte si elle dormait."""
+        self._last_activity = time.monotonic()
+        await self.update_sleep()
+        return await self.send_to_devices(cmd)
+
+    async def update_sleep(self) -> None:
+        """La nuit, sans personne devant la caméra ni activité récente : la boîte dort."""
+        asleep = (
+            self.rhythm.is_night()
+            and not self.cams.present
+            and time.monotonic() - self._last_activity > AWAKE_AFTER_ACTIVITY_S
+        )
+        if asleep != self._asleep:
+            self._asleep = asleep
+            log("sleep", asleep=asleep)
+            await self.send_to_devices({"type": "sleep", "on": asleep})
+
+    async def rhythm_loop(self) -> None:
+        while True:
+            await self.update_sleep()
+            await asyncio.sleep(20)
 
     async def _greet_visitor(self) -> None:
         try:
@@ -302,6 +357,8 @@ class OpalBridge:
             await self._send(ws, type="presence", present=self.cams.present)
         if self.cams.viewers:
             await self._send(ws, type="recording", on=True)
+        if self._asleep:
+            await self._send(ws, type="sleep", on=True)
         audio = bytearray()
         recording = False
         try:
@@ -404,10 +461,11 @@ async def run(host: str, port: int, device_token: str) -> None:
     activity = OpalActivity(
         iris_url.replace("http", "ws", 1).rstrip("/") + "/ws",
         iris_token(),
-        bridge.send_to_devices,
+        bridge.note_activity,
         bridge.set_pending_confirmation,
     )
     activity.start()
+    rhythm_task = asyncio.create_task(bridge.rhythm_loop())  # noqa: F841 (vit avec le pont)
     if node_token := iris_node_token():
         node_url = iris_url.replace("http", "ws", 1).rstrip("/") + "/node"
         bridge.node = OpalNode(node_url, node_token, bridge.handle_tool)

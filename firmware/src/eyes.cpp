@@ -392,6 +392,11 @@ struct {
   uint32_t aimSince = 0, shootAt = 0, doneAt = 0;
 } lensAnim;
 
+// Sommeil (la nuit, sans personne) : paupières closes, écran assombri.
+volatile bool sleepWanted = false;
+float sleepAmount = 0;  // 0 éveillé .. 1 endormi
+int dimLevel = 32;      // luminosité globale /32
+
 struct {
   int alpha = 0;     // 0..32 : part de l'objectif dans l'iris
   int open2 = 0;     // rayon de l'ouverture du diaphragme (unités distance*2)
@@ -548,7 +553,12 @@ void animate() {
   anim.pupil += (pupilTarget - anim.pupil) * min(1.f, dt * 3);
 
   animateLens(now, dt);
-  float closed[2] = {blinkAmount(anim.blink[0], now), blinkAmount(anim.blink[1], now)};
+  // Sommeil : les paupières se ferment lentement et l'écran s'assombrit ; réveil plus vif.
+  const float sleepTarget = sleepWanted ? 1.f : 0.f;
+  sleepAmount += (sleepTarget - sleepAmount) * min(1.f, dt * (sleepWanted ? 0.8f : 3.f));
+  dimLevel = 32 - (int)(sleepAmount * 22);
+  float closed[2] = {max(blinkAmount(anim.blink[0], now), sleepAmount),
+                     max(blinkAmount(anim.blink[1], now), sleepAmount)};
   const float lookAhead = 1 - lensAnim.amount;  // en mode objectif, les yeux visent droit devant
   for (int e = 0; e < 2; e++) {
     EyeFrame& f = frame[e];
@@ -624,7 +634,7 @@ void renderStrip(int e, int y0, uint16_t* out) {
     const int dh1 = y - hy1, dh2 = y - hy2;
     const int dh1sq = dh1 * dh1, dh2sq = dh2 * dh2;
     const uint32_t ditherRow = y & 1;
-    const int lensAlpha = lens.alpha, flash = lens.flash;
+    const int lensAlpha = lens.alpha, flash = lens.flash, dim = dimLevel;
     const int recDy = y - REC_Y;
     const bool recRow = e == 1 && lens.rec && recDy * recDy < REC_R2;
 
@@ -682,6 +692,7 @@ void renderStrip(int e, int y0, uint16_t* out) {
         if (coverU > 0) c = blend565(c, RIM_UPPER, coverU * 2);
         if (coverL > 0) c = blend565(c, RIM_LOWER, coverL * 2);
       }
+      if (dim < 32) c = scale565(c, dim);
       if (flash) c = blend565(c, FLASH, flash);
       if (recRow) {  // voyant « on te filme », bord adouci
         const int rdx = x - REC_X, d = rdx * rdx + recDy * recDy;
@@ -793,6 +804,7 @@ void cameraAim() { lensAnim.request = 0; }
 void cameraShoot() { lensAnim.request = 1; }
 void cameraDone() { lensAnim.request = 2; }
 void setRecording(bool on) { lensAnim.recording = on; }
+void setAsleep(bool asleep) { sleepWanted = asleep; }
 
 float fps() { return fpsValue; }
 
