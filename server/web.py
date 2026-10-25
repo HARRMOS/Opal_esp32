@@ -82,7 +82,9 @@ SOURCE_PAGE = """<!doctype html>
 <style>
   body{margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;
        justify-content:center;gap:12px;background:#0b0d12;color:#cfd6e4;font:15px system-ui,sans-serif}
+  #pv{position:relative;line-height:0}
   video{width:min(92vw,640px);border-radius:12px;background:#000;transform:scaleX(-1)}
+  #ov{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
   video.back{transform:none}
   .row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
   button,select{font:inherit;color:#cfd6e4;background:#1d2333;border:1px solid #4a5675;
@@ -91,7 +93,7 @@ SOURCE_PAGE = """<!doctype html>
   p{opacity:.65;margin:0;text-align:center;max-width:90vw}
 </style></head>
 <body>
-<video id="v" playsinline muted autoplay></video>
+<div id="pv"><video id="v" playsinline muted autoplay></video><canvas id="ov"></canvas></div>
 <div class="row">
   <select id="facing"><option value="user">Caméra avant</option>
     <option value="environment">Caméra arrière</option></select>
@@ -178,6 +180,77 @@ function stop() {
 }
 
 go.onclick = () => (running ? stop() : start());
+// Vision d'Opal par-dessus l'aperçu : ce que le VPS détecte (visage, main, geste).
+const ov = document.getElementById("ov"), octx = ov.getContext("2d");
+const GESTES = { pouce_haut: "Pouce levé", pouce_bas: "Pouce baissé", main_ouverte: "Main ouverte" };
+const LINKS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
+const mirrored = () => !v.classList.contains("back");
+const px = (x) => (mirrored() ? 1 - x : x) * ov.width;  // l'aperçu avant est en miroir
+
+function tag(text, x, y, color) {
+  const size = Math.max(13, ov.width / 30);
+  octx.font = `600 ${size}px system-ui, sans-serif`;
+  const w = octx.measureText(text).width + size * 0.9, h = size * 1.5;
+  x = Math.min(Math.max(0, x), ov.width - w);
+  const top = y - h - 4 < 0 ? y + 4 : y - h - 4;
+  octx.fillStyle = color; octx.beginPath(); octx.roundRect(x, top, w, h, h / 2); octx.fill();
+  octx.fillStyle = "#0b0d12"; octx.fillText(text, x + size * 0.45, top + h * 0.7);
+}
+
+function corners(x1, y1, x2, y2, color) {
+  const arm = Math.max(8, Math.min(x2 - x1, y2 - y1) / 4);
+  octx.strokeStyle = color; octx.lineWidth = Math.max(2, ov.width / 220); octx.beginPath();
+  for (const [cx, cy, dx, dy] of [[x1, y1, 1, 1], [x2, y1, -1, 1], [x1, y2, 1, -1], [x2, y2, -1, -1]]) {
+    octx.moveTo(cx + dx * arm, cy); octx.lineTo(cx, cy); octx.lineTo(cx, cy + dy * arm);
+  }
+  octx.stroke();
+}
+
+function drawVision(s) {
+  const r = devicePixelRatio || 1;
+  ov.width = v.clientWidth * r; ov.height = v.clientHeight * r;
+  octx.clearRect(0, 0, ov.width, ov.height);
+  const fresh = (d) => d && s.now - d.at < 0.8, H = ov.height;
+  if (fresh(s.face)) {
+    const f = s.face, [x, y, w, h] = f.box;
+    const color = f.name ? "#4fd18b" : f.name === "" ? "#f2a24a" : "#9aa6bd";
+    let text = f.name ? f.name : f.name === "" ? "Inconnu" : "Visage…";
+    if (f.name != null && f.score != null) text += `  ${Math.round(f.score * 100)} %`;
+    const xa = px(x), xb = px(x + w);
+    corners(Math.min(xa, xb), y * H, Math.max(xa, xb), (y + h) * H, color);
+    octx.fillStyle = color;
+    for (const [qx, qy] of f.points || []) { octx.beginPath(); octx.arc(px(qx), qy * H, Math.max(2, ov.width / 260), 0, 7); octx.fill(); }
+    tag(text, Math.min(xa, xb), y * H, color);
+  }
+  if (fresh(s.hand) && (s.hand.points || []).length === 21) {
+    const p = s.hand.points.map(([qx, qy]) => [px(qx), qy * H]);
+    octx.strokeStyle = "#5aa9ff"; octx.lineWidth = Math.max(2, ov.width / 220); octx.beginPath();
+    for (const [a, b] of LINKS) { octx.moveTo(...p[a]); octx.lineTo(...p[b]); }
+    octx.stroke();
+    octx.fillStyle = "#fff";
+    for (const q of p) { octx.beginPath(); octx.arc(q[0], q[1], Math.max(2.5, ov.width / 200), 0, 7); octx.fill(); }
+    const top = Math.min(...p.map((q) => q[1])), left = Math.min(...p.map((q) => q[0]));
+    tag(GESTES[s.hand.gesture] || "Main", left, top, "#5aa9ff");
+  }
+  let state = !s.present ? "Personne" : s.who ? `${s.who} est là` : s.who === "" ? "Inconnu" : "Quelqu'un est là";
+  const last = s.last_gesture;
+  if (last && s.now - last.at < 5) state += `  ·  ${GESTES[last.name] || last.name} !`;
+  if (running) say(`Opal voit : ${state}`);
+}
+
+async function vision() {
+  if (running) {
+    try {
+      const res = await fetch("/opal/cam/infos", { cache: "no-store" });
+      if (res.ok) drawVision(await res.json());
+    } catch {}
+  } else {
+    octx.clearRect(0, 0, ov.width, ov.height);
+  }
+  setTimeout(vision, 150);
+}
+vision();
 </script></body></html>"""
 
 
