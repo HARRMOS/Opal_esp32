@@ -12,12 +12,16 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import time
+from collections import defaultdict, deque
+from urllib.parse import urlsplit
 
 from collections.abc import Callable
 
 from aiohttp import WSMsgType, web
 
 from camera import CameraHub
+from logs import log
 
 PAGE = """<!doctype html>
 <html lang="fr"><head><meta charset="utf-8">
@@ -290,6 +294,10 @@ vision();
 </script></body></html>"""
 
 
+MAX_FAILURES = 8
+LOCKOUT_S = 15 * 60
+
+
 class BrowserSource:
     """Connexion WebSocket d'aiohttp présentée comme celle d'une ESP32-CAM."""
 
@@ -315,11 +323,37 @@ def make_app(
         else ""
     )
 
+    # Essais de mot de passe ratés par adresse IP : au-delà de MAX_FAILURES en 15 min,
+    # l'adresse est bloquée 15 min (le mot de passe ne peut pas être deviné à la chaîne).
+    failures: defaultdict[str, deque[float]] = defaultdict(deque)
+
+    def client_ip(request: web.Request) -> str:
+        # Traefik remplace X-Real-Ip par la vraie adresse : le client ne peut pas la falsifier.
+        return request.headers.get("X-Real-Ip") or request.remote or "?"
+
+    def blocked(ip: str, now: float) -> bool:
+        tries = failures[ip]
+        while tries and now - tries[0] > LOCKOUT_S:
+            tries.popleft()
+        if not tries:
+            failures.pop(ip, None)
+        return len(tries) >= MAX_FAILURES
+
     @web.middleware
     async def auth(request: web.Request, handler):  # type: ignore[no-untyped-def]
+        # Un autre site ne doit pas pouvoir ouvrir nos WebSockets avec ta session
+        # (il entendrait la voix d'Opal ou remplacerait la caméra).
+        origin = request.headers.get("Origin")
+        if origin and urlsplit(origin).netloc != request.host:
+            log("cam_origin_refused", origin=origin[:80], ip=client_ip(request))
+            return web.Response(status=403, text="Origine refusée.")
         cookie = request.cookies.get("iris_session", "")
         if session and cookie and hmac.compare_digest(cookie, session):
-            return await handler(request)
+            return await secure(await handler(request))
+        # Le blocage ne vise que le mot de passe : ta session Iris passe toujours.
+        ip, now = client_ip(request), time.monotonic()
+        if blocked(ip, now):
+            return web.Response(status=429, text="Trop d'essais, réessaie plus tard.")
         header = request.headers.get("Authorization", "")
         if header.startswith("Basic "):
             try:
@@ -327,12 +361,24 @@ def make_app(
             except ValueError:
                 given = ""
             if password and hmac.compare_digest(given.encode(), password.encode()):
-                return await handler(request)
+                return await secure(await handler(request))
+            failures[ip].append(now)
+            log("cam_login_failed", ip=ip, failures=len(failures[ip]))
         return web.Response(
             status=401,
             text="Mot de passe requis.",
             headers={"WWW-Authenticate": 'Basic realm="Opal Box", charset="UTF-8"'},
         )
+
+    async def secure(response: web.StreamResponse) -> web.StreamResponse:
+        """En-têtes de protection : pas d'intégration dans un autre site, pas de cache."""
+        if not response.prepared:
+            response.headers.setdefault("X-Frame-Options", "DENY")
+            response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+            response.headers.setdefault("Referrer-Policy", "no-referrer")
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("Cache-Control", "no-store")
+        return response
 
     async def page(_: web.Request) -> web.Response:
         return web.Response(text=PAGE, content_type="text/html")
