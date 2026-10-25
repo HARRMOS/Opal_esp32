@@ -86,6 +86,7 @@ def setup() -> None:
                 "machine": machine[:40],
                 "salt": salt.hex(),
                 "code_hash": hash_code(code, salt),
+                "code_len": len(code),
             }
         ),
         encoding="utf-8",
@@ -118,6 +119,69 @@ def native_lock() -> None:
         print(f"verrou natif indisponible : {exc}", file=sys.stderr)
 
 
+# ── Blocage clavier bas niveau (Windows) ─────────────────────────────────────
+# Un programme ne peut pas bloquer Ctrl+Alt+Suppr (c'est voulu par Windows, et c'est notre
+# filet vers le verrou natif). Mais un hook WH_KEYBOARD_LL bloque tout le reste tant que
+# c'est verrouillé : touche Windows, Alt+Tab, Alt+Échap, Ctrl+Échap, Alt+F4, Ctrl+Maj+Échap.
+class KeyBlocker:
+    def __init__(self, is_locked) -> None:
+        self._is_locked = is_locked
+        self._hook = None
+        self._proc = None
+        if not IS_WINDOWS:
+            return
+        import ctypes
+        from ctypes import wintypes
+
+        self._ctypes, self._wintypes = ctypes, wintypes
+        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self._WH = 13  # WH_KEYBOARD_LL
+        self._DOWN = (0x0100, 0x0104)  # WM_KEYDOWN, WM_SYSKEYDOWN
+
+        class KBD(ctypes.Structure):
+            _fields_ = [("vkCode", wintypes.DWORD), ("scanCode", wintypes.DWORD),
+                        ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
+                        ("extra", ctypes.POINTER(wintypes.ULONG))]
+
+        self._KBD = KBD
+        self._PROC = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+        self._user32.SetWindowsHookExW.restype = wintypes.HHOOK
+        self._user32.SetWindowsHookExW.argtypes = [ctypes.c_int, self._PROC, wintypes.HINSTANCE,
+                                                   wintypes.DWORD]
+        self._user32.CallNextHookEx.restype = wintypes.LPARAM
+        self._user32.CallNextHookEx.argtypes = [wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM,
+                                                wintypes.LPARAM]
+
+    def _down(self, vk: int) -> bool:
+        return bool(self._user32.GetAsyncKeyState(vk) & 0x8000)
+
+    def _callback(self, nCode, wParam, lParam):  # noqa: ANN001
+        if nCode == 0 and self._is_locked() and wParam in self._DOWN:
+            vk = self._ctypes.cast(lParam, self._ctypes.POINTER(self._KBD)).contents.vkCode
+            alt, ctrl, shift = self._down(0x12), self._down(0x11), self._down(0x10)
+            block = (
+                vk in (0x5B, 0x5C)                       # touche Windows gauche / droite
+                or (vk == 0x09 and alt)                  # Alt+Tab
+                or (vk == 0x1B and (alt or ctrl))        # Alt+Échap, Ctrl+Échap (menu Démarrer)
+                or (vk == 0x73 and alt)                  # Alt+F4
+                or (vk == 0x1B and ctrl and shift)       # Ctrl+Maj+Échap (Gestionnaire)
+            )
+            if block:
+                return 1  # touche avalée
+        return self._user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+    def install(self) -> None:
+        if not IS_WINDOWS or self._hook:
+            return
+        self._proc = self._PROC(self._callback)  # garder la référence (sinon ramassé)
+        self._hook = self._user32.SetWindowsHookExW(self._WH, self._proc, None, 0)
+
+    def remove(self) -> None:
+        if IS_WINDOWS and self._hook:
+            self._user32.UnhookWindowsHookEx(self._hook)
+            self._hook = None
+
+
 # ── Écran de garde Opal (Tkinter, sur le thread principal) ───────────────────
 class LockScreen:
     """Fenêtre plein écran, par-dessus tout, avec l'œil du gardien et le clavier de code."""
@@ -131,6 +195,8 @@ class LockScreen:
         self._entry = ""
         self._attempts = 0
         self._tamper_armed = False
+        self._code_len = int(config.get("code_len", 0))  # 0 = longueur inconnue → validation par OK
+        self._blocker = KeyBlocker(lambda: self._locked)
 
         self.root = tk.Tk()
         self.root.withdraw()
@@ -139,8 +205,9 @@ class LockScreen:
         self.root.protocol("WM_DELETE_WINDOW", lambda: None)  # la croix ne ferme pas
 
         self._build()
-        # Toute touche est avalée tant que c'est verrouillé (sauf le clavier à l'écran).
-        self.root.bind_all("<Key>", self._swallow_key)
+        # Les chiffres tapés au clavier physique entrent le code ; Entrée valide, Retour arrière
+        # efface. Toute autre touche est avalée tant que c'est verrouillé.
+        self.root.bind_all("<Key>", self._on_physical_key)
         self.root.bind("<FocusOut>", self._on_focus_out)
         self._pulse()
 
@@ -177,13 +244,17 @@ class LockScreen:
 
         keys = tk.Frame(pad, bg="#0b090d")
         keys.pack(anchor="w")
-        for i, label in enumerate(["1", "2", "3", "4", "5", "6", "7", "8", "9", "C", "0", "←"]):
+        # Dernière ligne : ⌫ (effacer), 0, OK (valider) — OK fonctionne quelle que soit la
+        # longueur du code, donc un code de 6 chiffres passe aussi bien qu'un de 4.
+        for i, label in enumerate(["1", "2", "3", "4", "5", "6", "7", "8", "9", "⌫", "0", "OK"]):
+            ok = label == "OK"
             btn = tk.Button(
                 keys, text=label, width=5, height=2, font=("Segoe UI", 18),
-                bg="#151114", fg="#efe9e4", activebackground="#22181b", activeforeground="#fff",
+                bg="#1d3a2a" if ok else "#151114", fg="#8ff0bd" if ok else "#efe9e4",
+                activebackground="#22181b", activeforeground="#fff",
                 relief="flat", bd=0, highlightthickness=0,
                 command=lambda k=label: self._key(k))
-            btn.grid(row=i // 3, column=i % 3, padx=5, pady=5)
+            btn.grid(row=i // 3, column=i % 3, padx=5, pady=5, sticky="nsew")
 
     # ── Verrouiller / déverrouiller (appelé depuis le thread réseau via la file) ──
     def lock(self, reason: str = "") -> None:
@@ -205,6 +276,7 @@ class LockScreen:
             self.root.grab_set_global()
         except tk.TclError:
             pass
+        self._blocker.install()  # bloque Windows/Alt+Tab/etc. tant que c'est verrouillé
         # Laisse une seconde avant d'armer la détection de fuite (le temps de prendre le focus).
         self.root.after(1200, lambda: setattr(self, "_tamper_armed", True))
         self._report(True)
@@ -214,6 +286,7 @@ class LockScreen:
             return
         self._locked = False
         self._tamper_armed = False
+        self._blocker.remove()
         try:
             self.root.grab_release()
         except tk.TclError:
@@ -227,15 +300,30 @@ class LockScreen:
     def _key(self, k: str) -> None:
         if not self._locked:
             return
-        if k == "C":
-            self._entry = ""
-        elif k == "←":
+        if k == "⌫":
             self._entry = self._entry[:-1]
-        elif len(self._entry) < 12:
+        elif k == "OK":
+            if self._entry:
+                self._check()
+            return
+        elif k.isdigit() and len(self._entry) < 16:
             self._entry += k
         self._refresh()
-        if len(self._entry) >= 4 and k not in ("C", "←") and self._check():
-            pass
+        # Validation automatique seulement si on connaît la longueur du code (confort).
+        if self._code_len and len(self._entry) == self._code_len:
+            self._check()
+
+    def _on_physical_key(self, event):  # noqa: ANN001
+        # Clavier physique : chiffres → saisie, Entrée → valider, Retour arrière → effacer.
+        if not self._locked:
+            return None
+        if event.keysym in ("Return", "KP_Enter"):
+            self._key("OK")
+        elif event.keysym in ("BackSpace", "Delete"):
+            self._key("⌫")
+        elif len(event.char) == 1 and event.char.isdigit():
+            self._key(event.char)
+        return "break"  # rien d'autre ne passe
 
     def _check(self) -> bool:
         good = hmac.compare_digest(hash_code(self._entry, self._salt), self._config["code_hash"])
@@ -256,15 +344,14 @@ class LockScreen:
         return False
 
     def _refresh(self, keep_status: bool = False) -> None:
-        self.dots.config(text="●" * len(self._entry) + "○" * max(0, 4 - len(self._entry)))
+        n = len(self._entry)
+        # Un point par chiffre ; si on connaît la longueur, des cercles vides pour les manquants.
+        pad = max(0, self._code_len - n) if self._code_len else 0
+        self.dots.config(text="●" * n + "○" * pad)
         if not keep_status:
-            self.status.config(text="Entre ton code", fg="#9b8f8c")
+            self.status.config(text="Entre ton code puis OK", fg="#9b8f8c")
 
     # ── Anti-contournement ──
-    def _swallow_key(self, event):  # noqa: ANN001
-        # Les boutons du clavier à l'écran gèrent la saisie ; toute autre touche est ignorée.
-        return "break" if self._locked else None
-
     def _on_focus_out(self, _event) -> None:  # noqa: ANN001
         # On a perdu le focus alors que c'est verrouillé : quelqu'un a forcé le passage
         # (touche Windows, Alt+Tab, Ctrl+Alt+Suppr…). On engage le vrai verrou du système.
