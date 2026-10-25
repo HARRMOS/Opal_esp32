@@ -59,8 +59,8 @@ function draw(s) {
     g.textContent = `Dernier geste : ${GESTES[last.name] || last.name} · il y a ${ago < 60 ? ago + " s" : Math.round(ago / 60) + " min"}`;
     g.className = "chip" + (ago < 5 ? " ok" : "");
   }
-  document.getElementById("src").textContent = s.source === "navigateur" ? "Caméra iPhone / Mac"
-    : s.source ? "ESP32-CAM" : "Caméra hors ligne";
+  document.getElementById("src").textContent = (s.source === "navigateur" ? "Caméra iPhone / Mac"
+    : s.source ? "ESP32-CAM" : "Caméra hors ligne") + (s.source ? ` · ${s.fps_in} img/s` : "");
 }
 
 async function tick() {
@@ -127,7 +127,9 @@ function schedule() {
   timer = setInterval(async () => {
     if (busy) return;
     busy = true;
-    await grab(1, size === "vga" ? 640 : 320, 0.75);
+    // Réseau en retard : on saute l'image plutôt que d'empiler (direct sans décalage).
+    if (ws && ws.bufferedAmount < 96 * 1024)
+      await grab(1, size === "hd" ? 960 : size === "vga" ? 640 : 320, 0.85);
     busy = false;
   }, 1000 / Math.max(1, fps));
 }

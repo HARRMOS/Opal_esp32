@@ -42,13 +42,20 @@ cv2.setNumThreads(1)
 _CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
 
-def enhance(jpeg: bytes, width: int = 640, overlay: dict[str, Any] | None = None) -> bytes:
-    """Rend l'image du direct plus lisible : agrandie proprement, contraste local
-    équilibré (CLAHE sur la luminance), légère accentuation des contours ; puis,
-    avec `overlay`, incruste la vision d'Opal (visage, main, geste)."""
+def enhance(
+    jpeg: bytes, width: int = 640, overlay: dict[str, Any] | None = None, improve: bool = True
+) -> bytes:
+    """Image du direct. `improve` (caméra médiocre, ESP32-CAM) : agrandie proprement,
+    contraste local équilibré (CLAHE), contours accentués. Puis, avec `overlay`,
+    incrustation de la vision d'Opal (visage, main, geste)."""
     img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         return jpeg
+    if not improve:  # bonne caméra (iPhone, Mac) : on ne touche pas à l'image
+        if overlay is not None:
+            img = hud.draw(img, overlay)
+        ok, out = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        return out.tobytes() if ok else jpeg
     h, w = img.shape[:2]
     if w < width:
         img = cv2.resize(img, (width, int(h * width / w)), interpolation=cv2.INTER_CUBIC)
@@ -154,6 +161,7 @@ class CameraHub:
         self._gesture_check = 0.0
         self._last_score: float | None = None
         self.seen: dict[str, Any] = {}  # dernières détections, pour la page du direct
+        self._arrivals: deque[float] = deque(maxlen=40)  # heures d'arrivée des images
 
     @property
     def online(self) -> bool:
@@ -272,6 +280,7 @@ class CameraHub:
             # iPhone / Mac : 8 analyses/s pour un suivi de la tête bien fluide.
             track = {"type": "cam", "fps": 8, "size": "qvga"}
             view = {"type": "cam", "fps": 12, "size": "vga"}
+            view_hd = {"type": "cam", "fps": 8, "size": "hd"}
         else:  # ESP32-CAM : réglages manuels possibles (alimentation dédiée…)
             if fps := os.environ.get("OPAL_CAM_FPS"):
                 track["fps"] = int(fps)
@@ -289,7 +298,16 @@ class CameraHub:
         if self.frame is None:
             return None
         if self._enhanced_at != self.frame_at:
-            self._enhanced = enhance(self.frame, overlay=self.infos())
+            info = self.infos()
+            if self.source_name == "navigateur":
+                # Bonne caméra : image d'origine, sauf s'il y a une détection à incruster.
+                fresh = any(
+                    isinstance(d, dict) and info["now"] - d.get("at", 0) < hud.FRESH_S
+                    for d in (info.get("face"), info.get("hand"), info.get("last_gesture"))
+                )
+                self._enhanced = enhance(self.frame, overlay=info, improve=False) if fresh else self.frame
+            else:
+                self._enhanced = enhance(self.frame, overlay=info)
             self._enhanced_at = self.frame_at
         return self._enhanced
 
@@ -310,6 +328,7 @@ class CameraHub:
                 self._snapshot.set_result(jpeg)
             return
         self.frame, self.frame_at = jpeg, time.time()
+        self._arrivals.append(self.frame_at)
         async with self.new_frame:
             self.new_frame.notify_all()
         if not self._analyzing:  # on saute les images si l'analyse précédente n'est pas finie
@@ -418,6 +437,12 @@ class CameraHub:
             self.photos.popitem(last=False)
         return photo_id
 
+    def _fps_in(self) -> float:
+        """Images reçues par seconde, sur les 3 dernières secondes."""
+        now = time.time()
+        recent = [t for t in self._arrivals if now - t < 3]
+        return round(len(recent) / 3, 1)
+
     def infos(self) -> dict[str, Any]:
         """État des détections pour la page du direct (cadres, prénom, geste)."""
         return {
@@ -426,6 +451,7 @@ class CameraHub:
             "present": self.present,
             "who": self.identity if self.present else None,
             "known": list(self.faces.people) if self.faces else [],
+            "fps_in": self._fps_in(),
             **self.seen,
         }
 
