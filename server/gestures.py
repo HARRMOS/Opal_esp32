@@ -61,19 +61,23 @@ class GestureDetector:
             confThreshold=0.8,
         )
 
-    def detect(self, img: np.ndarray) -> tuple[str | None, tuple[float, ...] | None]:
-        """(geste reconnu ou None, boîte de la main normalisée x, y, l, h ou None)."""
+    def detect(self, img: np.ndarray) -> tuple[str | None, dict | None]:
+        """(geste reconnu ou None, main vue : boîte et 21 points normalisés, ou None)."""
         h, w = img.shape[:2]
         palms = self._palm.infer(img)
-        found_box = None
+        found = None
         for palm in palms[:2]:
             hand = self._hand.infer(img, palm)
             if hand is None:
                 continue
             x1, y1, x2, y2 = (float(v) for v in hand[:4])
-            box = (max(0.0, x1 / w), max(0.0, y1 / h), (x2 - x1) / w, (y2 - y1) / h)
-            found_box = found_box or box
-            gesture = classify(hand[4:67].reshape(21, 3))
+            points = hand[4:67].reshape(21, 3)
+            seen = {
+                "box": (max(0.0, x1 / w), max(0.0, y1 / h), (x2 - x1) / w, (y2 - y1) / h),
+                "points": [(float(px) / w, float(py) / h) for px, py, _ in points],
+            }
+            found = found or seen
+            gesture = classify(points)
             if gesture:
-                return gesture, box
-        return None, found_box
+                return gesture, seen
+        return None, found

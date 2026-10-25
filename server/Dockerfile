@@ -5,7 +5,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     OPAL_MODELS_DIR=/models
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home --uid 1000 opal && mkdir -p /models && chown opal /models
 

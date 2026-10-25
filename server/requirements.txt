@@ -7,3 +7,4 @@ miniaudio>=1.61,<2
 aiohttp>=3.9,<4
 opencv-python-headless>=4.9,<5
 tzdata>=2024.1
+pillow>=10

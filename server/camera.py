@@ -22,6 +22,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+import hud
 from faces import FaceBook
 from gestures import GestureDetector
 from logs import log
@@ -41,9 +42,10 @@ cv2.setNumThreads(1)
 _CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
 
-def enhance(jpeg: bytes, width: int = 640) -> bytes:
+def enhance(jpeg: bytes, width: int = 640, overlay: dict[str, Any] | None = None) -> bytes:
     """Rend l'image du direct plus lisible : agrandie proprement, contraste local
-    équilibré (CLAHE sur la luminance), légère accentuation des contours."""
+    équilibré (CLAHE sur la luminance), légère accentuation des contours ; puis,
+    avec `overlay`, incruste la vision d'Opal (visage, main, geste)."""
     img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         return jpeg
@@ -55,6 +57,8 @@ def enhance(jpeg: bytes, width: int = 640) -> bytes:
     img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
     blur = cv2.GaussianBlur(img, (0, 0), 1.2)
     img = cv2.addWeighted(img, 1.5, blur, -0.5, 0)
+    if overlay is not None:
+        img = hud.draw(img, overlay)
     ok, out = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return out.tobytes() if ok else jpeg
 
@@ -82,7 +86,9 @@ class FaceTracker:
         row = max(faces, key=lambda f: f[2] * f[3])
         x, y, fw, fh = row[:4]
         box = (float(x) / w, float(y) / h, float(fw) / w, float(fh) / h)
-        return Face(float(x + fw / 2) / w, float(y + fh / 2) / h, float(fw) / w, row, img, box)
+        points = [(float(row[4 + 2 * i]) / w, float(row[5 + 2 * i]) / h) for i in range(5)]
+        return Face(float(x + fw / 2) / w, float(y + fh / 2) / h, float(fw) / w, row, img, box,
+                    points)
 
 
 @dataclass
@@ -93,6 +99,7 @@ class Face:
     row: np.ndarray  # ligne YuNet (boîte + points du visage), pour l'alignement SFace
     img: np.ndarray
     box: tuple[float, float, float, float] = (0, 0, 0, 0)  # x, y, l, h normalisés (affichage)
+    points: list[tuple[float, float]] | None = None  # yeux, nez, coins de la bouche
 
 
 class CameraHub:
@@ -282,7 +289,7 @@ class CameraHub:
         if self.frame is None:
             return None
         if self._enhanced_at != self.frame_at:
-            self._enhanced = enhance(self.frame)
+            self._enhanced = enhance(self.frame, overlay=self.infos())
             self._enhanced_at = self.frame_at
         return self._enhanced
 
@@ -349,12 +356,12 @@ class CameraHub:
             self._last_score = round(who[1], 2)
         # Infos pour l'affichage sur la page du direct (horodatées : la page efface le périmé).
         if face is not None:
-            self.seen["face"] = {"box": face.box, "name": self.identity,
+            self.seen["face"] = {"box": face.box, "points": face.points, "name": self.identity,
                                  "score": self._last_score, "at": now}
         if hand is not None:  # la main a été cherchée sur cette image
-            gesture, box = hand
-            if box:
-                self.seen["hand"] = {"box": box, "gesture": gesture, "at": now}
+            gesture, seen_hand = hand
+            if seen_hand:
+                self.seen["hand"] = {**seen_hand, "gesture": gesture, "at": now}
             await self._on_gesture_seen(gesture)
         enrolling = self._enrolling
         if enrolling and len(enrolling["embs"]) >= enrolling["want"] and not enrolling["done"].done():

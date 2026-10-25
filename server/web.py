@@ -29,7 +29,6 @@ PAGE = """<!doctype html>
   #wrap{position:relative;line-height:0}
   img{display:block;max-width:min(100vw,960px);max-height:76vh;width:auto;height:auto;
       min-width:min(90vw,480px);border-radius:12px;background:#000}
-  canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
   .bar{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;max-width:94vw}
   .chip{padding:5px 12px;border-radius:999px;background:#151a26;border:1px solid #2a3040;font-size:14px}
   .chip.ok{border-color:#2f7a52;color:#9fe0bb}.chip.warn{border-color:#8a5a22;color:#f2c48a}
@@ -38,45 +37,18 @@ PAGE = """<!doctype html>
   a.on{background:#1d2333;border-color:#4a5675}
 </style></head>
 <body>
-<div id="wrap"><img id="v" alt="Caméra d'Opal Box"><canvas id="o"></canvas></div>
+<div id="wrap"><img id="v" alt="Caméra d'Opal Box"></div>
 <div class="bar"><span id="who" class="chip">…</span><span id="gesture" class="chip">Aucun geste</span><span id="src" class="chip">…</span></div>
 <nav><a id="fluide" href="?">Fluide</a><a id="net" href="?hd=1">Net</a><a href="/opal/cam/envoyer">Envoyer ma caméra</a></nav>
 <script>
 const hd = new URLSearchParams(location.search).has("hd");
-const v = document.getElementById("v"), o = document.getElementById("o"), ctx = o.getContext("2d");
+// Visage, main et geste sont incrustés dans la vidéo par le VPS ; ici, la barre d'état.
+const v = document.getElementById("v");
 v.src = "/opal/cam/stream" + (hd ? "?hd=1" : "");
 document.getElementById(hd ? "net" : "fluide").classList.add("on");
 const GESTES = { pouce_haut: "👍 pouce levé", pouce_bas: "👎 pouce baissé", main_ouverte: "✋ main ouverte" };
 
-function label(text, x, y, color) {
-  const size = Math.max(13, o.width / 34);
-  ctx.font = `600 ${size}px system-ui, sans-serif`;
-  const w = ctx.measureText(text).width + size * 0.8, h = size * 1.5;
-  const top = y - h - 4 < 0 ? y + 4 : y - h - 4;
-  ctx.fillStyle = color; ctx.beginPath(); ctx.roundRect(x, top, w, h, h / 2); ctx.fill();
-  ctx.fillStyle = "#0b0d12"; ctx.fillText(text, x + size * 0.4, top + h * 0.72);
-}
-
-function frame(box, color, text) {
-  const [x, y, w, h] = box, W = o.width, H = o.height;
-  ctx.strokeStyle = color; ctx.lineWidth = Math.max(2, W / 260);
-  ctx.beginPath(); ctx.roundRect(x * W, y * H, w * W, h * H, 10); ctx.stroke();
-  label(text, x * W, y * H, color);
-}
-
 function draw(s) {
-  const r = devicePixelRatio || 1;
-  o.width = v.clientWidth * r; o.height = v.clientHeight * r;
-  ctx.clearRect(0, 0, o.width, o.height);
-  const fresh = (d) => d && s.now - d.at < 1.0;
-  if (fresh(s.face)) {
-    const f = s.face, pct = f.score != null ? ` ${Math.round(f.score * 100)} %` : "";
-    if (f.name) frame(f.box, "#4fd18b", f.name + pct);
-    else if (f.name === "") frame(f.box, "#f2a24a", "inconnu" + pct);
-    else frame(f.box, "#9aa6bd", "visage…");
-  }
-  if (fresh(s.hand)) frame(s.hand.box, "#5aa9ff", GESTES[s.hand.gesture] || "main");
-
   const who = document.getElementById("who");
   who.textContent = !s.present ? "Personne devant la caméra"
     : s.who ? `${s.who} est là` : s.who === "" ? "Inconnu devant la caméra" : "Quelqu'un est là";
