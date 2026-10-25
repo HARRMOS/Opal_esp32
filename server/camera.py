@@ -26,6 +26,7 @@ import hud
 from faces import FaceBook
 from gestures import GestureDetector
 from pose import PoseDetector
+from expression import ExpressionReader, looks_at_camera
 from logs import log
 
 FRAME, SNAPSHOT = 1, 2
@@ -35,6 +36,9 @@ GAZE_HOLD_S = 1.2
 MAX_PHOTOS = 50
 GESTURE_COOLDOWN_S = 4.0
 # Vues consécutives exigées (≈ 3 par seconde) : le « coucou » doit être tenu ~1 s.
+EXPRESSION_MIN_CONFIDENCE = 0.55
+EXPRESSION_COOLDOWN_S = 10.0
+EYE_CONTACT_S = 1.5
 GESTURE_CONFIRM = {"main_ouverte": 3, "pouce_haut": 2, "pouce_bas": 2, "ok": 2, "bras_croises": 2}
 GESTURE_STILL = 0.12  # déplacement max de la main entre deux vues (fraction de l image)
 
@@ -135,6 +139,8 @@ class Face:
     img: np.ndarray
     box: tuple[float, float, float, float] = (0, 0, 0, 0)  # x, y, l, h normalisés (affichage)
     points: list[tuple[float, float]] | None = None  # yeux, nez, coins de la bouche
+    expression: tuple[str, float] | None = None  # (expression, confiance) si lue sur cette image
+    facing: bool = False  # regarde la caméra
 
 
 class CameraHub:
@@ -193,6 +199,20 @@ class CameraHub:
             log("poses_disabled", error=str(exc)[:120])
             self.poses = None
         self._gesture_check = 0.0
+        # Visage : expression (≈ 2 fois/s) et regard vers Opal (« contact visuel »).
+        try:
+            self.expressions: ExpressionReader | None = ExpressionReader()
+        except cv2.error as exc:
+            log("expressions_disabled", error=str(exc)[:120])
+            self.expressions = None
+        self.on_expression: Callable[[str], Awaitable[None]] | None = None
+        self.on_eye_contact: Callable[[], Awaitable[None]] | None = None
+        self._expr_check = 0.0
+        self._expr_last: str | None = None
+        self._expr_at: dict[str, float] = {}
+        self._facing_since: float | None = None
+        self._away_since = 0.0
+        self._contact_armed = True
         self._last_score: float | None = None
         self.seen: dict[str, Any] = {}  # dernières détections, pour la page du direct
         self._arrivals: deque[float] = deque(maxlen=40)  # heures d'arrivée des images
@@ -393,6 +413,11 @@ class CameraHub:
         sur cette image, sinon None."""
         face = self._tracker.find(jpeg)
         who = self._identify(face) if face is not None else None
+        if face is not None:
+            face.facing = looks_at_camera(face.row)
+            if self.expressions is not None and self.present and time.time() - self._expr_check > 0.5:
+                self._expr_check = time.time()
+                face.expression = self.expressions.read(face.img, face.row)
         hand = arms = None
         # Un geste suppose quelqu'un devant la caméra : main 3 fois/s, bras 2 fois/s au plus.
         now = time.time()
@@ -407,6 +432,33 @@ class CameraHub:
                 self._pose_check = now
                 arms = self.poses.detect(img)
         return face, who, hand, arms
+
+    async def _on_face_read(self, face: Face, now: float) -> None:
+        """Expression vue deux fois de suite → on_expression ; regard soutenu → on_eye_contact."""
+        if face.expression is not None:
+            expr, confidence = face.expression
+            steady = expr == self._expr_last and confidence > EXPRESSION_MIN_CONFIDENCE
+            self._expr_last = expr if confidence > EXPRESSION_MIN_CONFIDENCE else None
+            if (steady and expr != "neutral" and self.on_expression is not None
+                    and now - self._expr_at.get(expr, 0.0) > EXPRESSION_COOLDOWN_S):
+                self._expr_at[expr] = now
+                self._expr_last = None
+                log("expression", expression=expr, confidence=round(confidence, 2))
+                await self.on_expression(expr)
+        # Contact visuel : regarde Opal 1,5 s d'affilée ; réarmé après 3 s à regarder ailleurs.
+        if face.facing:
+            self._facing_since = self._facing_since or now
+            if (self._contact_armed and now - self._facing_since > EYE_CONTACT_S
+                    and self.on_eye_contact is not None):
+                self._contact_armed = False
+                log("eye_contact")
+                await self.on_eye_contact()
+        else:
+            if self._facing_since is not None:
+                self._away_since = now
+            self._facing_since = None
+            if now - self._away_since > 3.0:
+                self._contact_armed = True
 
     async def _on_gesture_seen(
         self, gesture: str | None, center: tuple[float, float] | None, track: GestureTrack | None = None
@@ -437,8 +489,11 @@ class CameraHub:
             self._last_score = round(who[1], 2)
         # Infos pour l'affichage sur la page du direct (horodatées : la page efface le périmé).
         if face is not None:
+            last_expr = (self.seen.get("face") or {}).get("expression")
             self.seen["face"] = {"box": face.box, "points": face.points, "name": self.identity,
-                                 "score": self._last_score, "at": now}
+                                 "score": self._last_score, "at": now, "facing": face.facing,
+                                 "expression": face.expression[0] if face.expression else last_expr}
+            await self._on_face_read(face, now)
         if hand is not None:  # la main a été cherchée sur cette image
             gesture, seen_hand = hand
             if seen_hand:

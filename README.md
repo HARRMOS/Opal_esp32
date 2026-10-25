@@ -188,6 +188,15 @@ un pouce levé ou une main ouverte. Opal la pilote avec l'outil `opal_box_tete`.
   un Wake-on-LAN aux MAC de `OPAL_PC_MACS`, puis la recette « Opal réveil écran » (Maj) rallume
   l'écran. Le réveil depuis la veille exige « Wake on Magic Packet » activé sur la carte
   réseau du PC (Ethernet de préférence : en Wi-Fi c'est rarement pris en charge).
+- **Opal parle tout seul** (`initiative.py`) : salutation / « bon retour » avec les
+  nouvelles, briefing du matin, pause après ~55 min, coucher après 00:30, « pensée »
+  toutes les ~40 min (agenda, rappels, mails ; il se tait s'il n'a rien d'utile). La voix
+  sort par l'iPhone / le Mac de la page caméra (sous-titrée), en attendant le haut-parleur.
+- **Visage** (`expression.py`) : Opal imite ton expression (sourire, surprise, tristesse),
+  ses pupilles s'ouvrent quand tu le regardes dans les yeux ; triste plusieurs fois en
+  quelques minutes = un mot gentil (1 fois/heure).
+- **Posture** (`posture.py`) : comparée à ta position habituelle ; trop près de l'écran ou
+  avachi pendant ~2 min = un rappel (au plus toutes les 30 min chacun).
 - **iPhone ou Mac comme caméra** : https://iris.inoma.pro/opal/cam/envoyer, bouton
   Démarrer. L'appareil remplace l'ESP32-CAM tant que la page est ouverte.
 

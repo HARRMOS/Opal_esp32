@@ -21,6 +21,8 @@ GREEN, ORANGE, GREY, BLUE = (79, 209, 139), (242, 162, 74), (154, 166, 189), (90
 GESTURES = {"pouce_haut": "Pouce levé", "pouce_bas": "Pouce baissé", "main_ouverte": "Main ouverte",
             "ok": "Signe OK", "bras_croises": "Bras croisés"}
 PURPLE = (180, 140, 255)
+FEELINGS = {"happy": "sourit", "surprised": "surpris", "sad": "triste", "angry": "fâché",
+            "fearful": "inquiet", "disgust": "dégoûté"}
 # Liaisons des 21 points de la main (MediaPipe) : poignet, pouce, index, majeur, annulaire, auriculaire
 HAND_LINKS = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (5, 9), (9, 10),
               (10, 11), (11, 12), (9, 13), (13, 14), (14, 15), (15, 16), (13, 17), (0, 17),
@@ -87,6 +89,10 @@ def draw(img: np.ndarray, info: dict[str, Any]) -> np.ndarray:
         text = name if name else "Inconnu" if name == "" else "Visage…"
         if name is not None and score is not None:
             text += f"  {round(score * 100)} %"
+        if feeling := FEELINGS.get(face.get("expression") or ""):
+            text += f"  ·  {feeling}"
+        if face.get("facing"):
+            text += "  ·  me regarde"
         x, y, bw, bh = face["box"]
         x1, y1, x2, y2 = int(x * w), int(y * h), int((x + bw) * w), int((y + bh) * h)
         _corners(img, x1, y1, x2, y2, color, t)

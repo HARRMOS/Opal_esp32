@@ -57,6 +57,7 @@ import os
 import re
 import sys
 import time
+from collections import deque
 from datetime import date
 from http import HTTPStatus
 from pathlib import Path
@@ -71,6 +72,7 @@ from aiohttp import web
 
 import vision
 from activity import OpalActivity
+import posture
 from initiative import SPOKEN, Initiative, Scene, duration, is_silent
 from camera import CameraHub
 from rhythm import DayRhythm
@@ -100,6 +102,20 @@ BACK_PROMPT = (
     "du nouveau d'important pour lui (messages, rappels, agenda proche), dis-le en bref."
 )
 BACK_AFTER_S = float(os.environ.get("OPAL_BACK_AFTER_MIN", "120")) * 60
+# Miroir des expressions : Opal sourit quand tu souris, s'étonne avec toi, s'attriste avec toi.
+EXPRESSION_EYES: dict[str, dict[str, object]] = {
+    "happy": {"mood": "happy", "blink": True, "hold_ms": 2500},
+    "surprised": {"mood": "surprised", "hold_ms": 1800},
+    "sad": {"mood": "sad", "look": [0, 0.3], "hold_ms": 3000},
+    "fearful": {"mood": "sad", "hold_ms": 2500},
+    "angry": {"mood": "sad", "pupil": 0.3, "hold_ms": 2500},
+    "disgust": {"mood": "surprised", "hold_ms": 1500},
+}
+COMFORT_PROMPT = (
+    "[Opal Box] {name} a l'air triste depuis quelques minutes devant toi. Dis-lui un mot "
+    "gentil et discret, sans insister ni poser de question intrusive."
+)
+COMFORT_COOLDOWN_S = 3600.0
 BRIEFING_PROMPT = (
     "[Opal Box] {name} arrive ce matin. Voici son briefing du jour :\n{text}\n"
     "Dis-lui l'essentiel en trois phrases maximum."
@@ -194,6 +210,8 @@ class OpalBridge:
         self.cams = CameraHub(self._on_gaze, self._on_presence)
         self.cams.on_recording = self._on_recording
         self.cams.on_gesture = self._on_gesture
+        self.cams.on_expression = self._on_expression
+        self.cams.on_eye_contact = self._on_eye_contact
         self.node: OpalNode | None = None
         self._node_stop: asyncio.TimerHandle | None = None
         self._last_gaze = 0.0
@@ -213,9 +231,12 @@ class OpalBridge:
         self._guarding = False
         self._woke_pc_at = -WAKE_COOLDOWN_S
         self.initiative = Initiative(self.rhythm)
+        self.posture = posture.PostureCoach()
         self._initiative_check = 0.0
         self._saying = False
         self._left_at = 0.0  # départ de la dernière personne (monotonic)
+        self._sad_seen: deque[float] = deque(maxlen=6)
+        self._comforted_at = -COMFORT_COOLDOWN_S
 
     def set_pending_confirmation(self, confirm_id: str | None) -> None:
         self.pending_confirmation = confirm_id
@@ -368,6 +389,28 @@ class OpalBridge:
         if not ok:
             await self.send_to_devices({"type": "eyes", "mood": "sad", "hold_ms": 2500})
 
+    async def _on_expression(self, expression: str) -> None:
+        if self._guarding or self._asleep or (eyes := EXPRESSION_EYES.get(expression)) is None:
+            return
+        await self.send_to_devices({"type": "eyes", **eyes})
+        if expression not in ("sad", "fearful"):
+            return
+        # Triste plusieurs fois en quelques minutes : Opal dit un mot gentil (1 fois/heure).
+        now = time.monotonic()
+        self._sad_seen.append(now)
+        recent = [t for t in self._sad_seen if now - t < 240]
+        who = self.cams.identity
+        if len(recent) >= 3 and who and now - self._comforted_at > COMFORT_COOLDOWN_S:
+            self._comforted_at = now
+            asyncio.create_task(self.say(COMFORT_PROMPT.format(name=who), "comfort"))
+
+    async def _on_eye_contact(self) -> None:
+        """Tu regardes Opal dans les yeux : pupilles qui s'ouvrent, petit sourire, clignement."""
+        if self._guarding or self._asleep:
+            return
+        await self.send_to_devices({"type": "eyes", "mood": "happy", "look": [0, 0], "pupil": 0.9,
+                                    "blink": True, "hold_ms": 1500})
+
     async def _on_recording(self, on: bool) -> None:
         log("live_view", watched=on)
         await self.send_to_devices({"type": "recording", "on": on})
@@ -484,6 +527,11 @@ class OpalBridge:
             prompt = self.initiative.observe(Scene(cams.present, who, self._asleep))
             if prompt:
                 asyncio.create_task(self.say(prompt, "initiative"))
+        # Posture : comparée à ta position habituelle (mesure toutes les 5 s).
+        if who and not self._asleep and (advice := self.posture.feed(cams.seen)):
+            log("posture", advice=advice)
+            await self.send_to_devices({"type": "eyes", "mood": "surprised", "hold_ms": 1500})
+            asyncio.create_task(self.say(posture.PROMPTS[advice].format(name=who), "posture"))
 
     async def _wake_pc(self, who: str) -> None:
         now = time.monotonic()

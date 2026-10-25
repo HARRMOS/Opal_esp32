@@ -202,6 +202,8 @@ go.onclick = () => (running ? stop() : start());
 const ov = document.getElementById("ov"), octx = ov.getContext("2d");
 const GESTES = { pouce_haut: "Pouce levé", pouce_bas: "Pouce baissé", main_ouverte: "Main ouverte",
   ok: "👌 OK", bras_croises: "Bras croisés" };
+const FEELINGS = { happy: "😊 sourit", surprised: "😮 surpris", sad: "😢 triste", angry: "😠 fâché",
+  fearful: "😟 inquiet", disgust: "😖 dégoûté" };
 // Bras : épaules, coudes, poignets (gauche/droite de la personne)
 const ARM_LINKS = [[0,1],[0,2],[2,4],[1,3],[3,5]];
 const LINKS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
@@ -238,6 +240,8 @@ function drawVision(s) {
     const color = f.name ? "#4fd18b" : f.name === "" ? "#f2a24a" : "#9aa6bd";
     let text = f.name ? f.name : f.name === "" ? "Inconnu" : "Visage…";
     if (f.name != null && f.score != null) text += `  ${Math.round(f.score * 100)} %`;
+    if (FEELINGS[f.expression]) text += `  ·  ${FEELINGS[f.expression]}`;
+    if (f.facing) text += "  ·  👀";
     const xa = px(x), xb = px(x + w);
     corners(Math.min(xa, xb), y * H, Math.max(xa, xb), (y + h) * H, color);
     octx.fillStyle = color;
