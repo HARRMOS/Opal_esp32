@@ -140,6 +140,9 @@ MUSIC_RECIPES = {
 MUSIC_REPEAT_S = 60.0  # un 👌 répété dans la minute ne rouvre pas d'onglet
 # Garde : un inconnu devant la caméra sans visage connu depuis OWNER_GRACE_S → yeux fâchés.
 OWNER_GRACE_S = 20.0
+# Verrouillage demandé (voix, recette) alors que tu es devant la caméra : ton visage ne
+# déverrouille qu'après une absence d'au moins ce temps (sinon ça se rouvre aussitôt).
+UNLOCK_AWAY_S = 10.0
 # Réveil du PC quand un visage connu arrive : Wake-on-LAN envoyé par la boîte (sur le réseau
 # de la maison) aux adresses MAC de OPAL_PC_MACS, puis recette qui rallume l'écran.
 PC_MACS = [m.strip() for m in os.environ.get("OPAL_PC_MACS", "").split(",") if m.strip()]
@@ -295,6 +298,7 @@ class OpalBridge:
         self._hearts_at = -HEARTS_EVERY_S
         self.guard = GuardHub()
         self._pc_locked = False
+        self._unlock_armed = True  # faux : verrouillé devant toi, il faut partir puis revenir
         self._stranger_since = 0.0
         self._comforted_at = -COMFORT_COOLDOWN_S
 
@@ -381,6 +385,7 @@ class OpalBridge:
             if not n:
                 return False, "Aucun PC avec l'agent de verrouillage n'est en ligne."
             self._pc_locked = True
+            self._unlock_armed = False
             await self.send_to_devices({"type": "eyes", "style": "gardien", "hold_ms": 0})
             return True, f"{n} PC verrouillé(s). Déverrouillage quand tu reconnais le propriétaire ou par son code."
         if tool == "opal_box_oublier_visage":
@@ -689,9 +694,11 @@ class OpalBridge:
         """Inconnu seul assez longtemps → verrouille les PC ; ton retour → déverrouille."""
         if not GUARD_ENABLED:
             return
+        if self._pc_locked and not self._unlock_armed and now - self._owner_seen >= UNLOCK_AWAY_S:
+            self._unlock_armed = True  # tu es parti : ton retour déverrouillera
         if owner_here:
             self._stranger_since = 0.0
-            if self._pc_locked:
+            if self._pc_locked and self._unlock_armed:
                 self._pc_locked = False
                 self.guard.send("unlock")
                 log("guard_unlock", reason="propriétaire reconnu")
@@ -702,6 +709,7 @@ class OpalBridge:
             if now - self._stranger_since >= GUARD_LOCK_AFTER_S:
                 if self.guard.send("lock", "Inconnu devant Opal pendant ton absence"):
                     self._pc_locked = True
+                    self._unlock_armed = True
                     log("guard_lock", seconds=round(now - self._stranger_since))
                     await self.send_to_devices({"type": "eyes", "style": "gardien", "hold_ms": 0})
         elif not stranger:
