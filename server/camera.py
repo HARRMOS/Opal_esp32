@@ -105,6 +105,8 @@ class CameraHub:
         self._mirror = os.environ.get("OPAL_CAM_MIRROR", "0") == "1"
         self.ws: Any = None
         self.soft_jpeg = False
+        self.source_name = ""
+        self._sources: list[tuple[Any, dict[str, Any]]] = []  # (connexion, hello), la dernière active
         self.frame: bytes | None = None
         self.frame_at = 0.0
         self.new_frame = asyncio.Condition()
@@ -191,23 +193,36 @@ class CameraHub:
 
     # ── Connexion de la caméra ──
     async def attach(self, ws: Any, hello: dict[str, Any] | None = None) -> None:
-        self.ws = ws
-        # Un capteur sans JPEG matériel (GC2145) compresse sur l'ESP32 : au-delà de
-        # 2 à 3 images/s, son WiFi décroche. Un OV2640 tient des cadences plus hautes.
-        self.soft_jpeg = bool((hello or {}).get("soft_jpeg"))
+        """Nouvelle source d'images. La plus récente est active (ex. l'iPhone ouvert sur
+        la page « envoyer » passe devant l'ESP32-CAM) ; à son départ la précédente reprend."""
+        self._sources = [(w, h) for w, h in self._sources if w is not ws] + [(ws, hello or {})]
+        await self._activate(ws, hello or {})
         if not self.present:
             self.present_since = time.time()  # « personne depuis » compte depuis la connexion
-        await self.apply_mode()
         if self._watchdog is None or self._watchdog.done():
             self._watchdog = asyncio.create_task(self._presence_watchdog())
 
+    async def _activate(self, ws: Any, hello: dict[str, Any]) -> None:
+        self.ws = ws
+        # Un capteur sans JPEG matériel (GC2145) compresse sur l'ESP32 : au-delà de
+        # 2 à 3 images/s, son WiFi décroche. Un OV2640 ou un téléphone tiennent bien plus.
+        self.soft_jpeg = bool(hello.get("soft_jpeg"))
+        self.source_name = str(hello.get("sensor") or hello.get("device") or "caméra")
+        log("camera_source", source=self.source_name)
+        await self.apply_mode()
+
     async def detach(self, ws: Any) -> None:
-        if self.ws is ws:
-            self.ws = None
-            if self._snapshot and not self._snapshot.done():
-                self._snapshot.set_exception(RuntimeError("Caméra déconnectée."))
-            if self.present:
-                await self._set_present(False)
+        self._sources = [(w, h) for w, h in self._sources if w is not ws]
+        if self.ws is not ws:
+            return
+        if self._snapshot and not self._snapshot.done():
+            self._snapshot.set_exception(RuntimeError("Caméra déconnectée."))
+        if self._sources:
+            await self._activate(*self._sources[-1])
+            return
+        self.ws = None
+        if self.present:
+            await self._set_present(False)
 
     async def apply_mode(self) -> None:
         """Flux léger pour le suivi ; plus riche quand quelqu'un regarde le direct.
@@ -251,9 +266,9 @@ class CameraHub:
                 pass
 
     # ── Images reçues ──
-    async def on_binary(self, data: bytes) -> None:
-        if len(data) < 2:
-            return
+    async def on_binary(self, data: bytes, ws: Any = None) -> None:
+        if len(data) < 2 or (ws is not None and ws is not self.ws):
+            return  # source en retrait (une autre caméra a pris la main)
         kind, jpeg = data[0], data[1:]
         if kind == SNAPSHOT:
             if self._snapshot and not self._snapshot.done():

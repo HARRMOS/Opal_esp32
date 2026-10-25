@@ -409,7 +409,7 @@ class OpalBridge:
         try:
             async for message in ws:
                 if isinstance(message, bytes):
-                    await self.cams.on_binary(message)
+                    await self.cams.on_binary(message, ws)
         finally:
             await self.cams.detach(ws)
             self._update_node()
@@ -540,7 +540,7 @@ async def run(host: str, port: int, device_token: str) -> None:
 
     runner: web.AppRunner | None = None
     if viewer_password := os.environ.get("OPAL_VIEWER_PASSWORD", ""):
-        runner = web.AppRunner(make_app(bridge.cams, viewer_password, iris_token()), access_log=None)
+        runner = web.AppRunner(make_app(bridge.cams, viewer_password, iris_token(), bridge._update_node), access_log=None)
         await runner.setup()
         await web.TCPSite(runner, host, port + 1).start()
         log("camera_web_ready", url=f"http://{host}:{port + 1}/opal/cam")
