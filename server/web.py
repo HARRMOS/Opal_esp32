@@ -136,6 +136,20 @@ function schedule() {
   }, 1000 / Math.max(1, fps));
 }
 
+// Voix d'Opal : PCM 16 bits mono envoyé par le VPS, joué à la suite (phrase après phrase).
+let audio = null, voiceRate = 24000, playhead = 0, spokeUntil = 0;
+function playVoice(buf) {
+  if (!audio) return;
+  const pcm = new Int16Array(buf), clip = audio.createBuffer(1, pcm.length, voiceRate);
+  const data = clip.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) data[i] = pcm[i] / 32768;
+  const src = audio.createBufferSource();
+  src.buffer = clip; src.connect(audio.destination);
+  playhead = Math.max(playhead, audio.currentTime + 0.05);
+  src.start(playhead);
+  playhead += clip.duration + 0.15;
+}
+
 function connect() {
   ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/opal/cam/source");
   ws.binaryType = "arraybuffer";
@@ -145,7 +159,9 @@ function connect() {
     schedule();
   };
   ws.onmessage = (e) => {
+    if (e.data instanceof ArrayBuffer) { playVoice(e.data); return; }
     const m = JSON.parse(e.data);
+    if (m.type === "say") { voiceRate = m.rate || 24000; say("🗣 Opal : " + m.text); spokeUntil = Date.now() + 8000; }
     if (m.type === "cam") { fps = m.fps || fps; size = m.size || size; schedule(); }
     if (m.type === "snapshot") grab(2, 1280, 0.9);
   };
@@ -156,6 +172,8 @@ function connect() {
 }
 
 async function start() {
+  // Créé pendant le clic : iPhone n'autorise le son qu'après un geste de l'utilisateur.
+  try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); await audio.resume(); } catch {}
   try {
     stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: facing.value, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
@@ -250,7 +268,7 @@ function drawVision(s) {
   let state = !s.present ? "Personne" : s.who ? `${s.who} est là` : s.who === "" ? "Inconnu" : "Quelqu'un est là";
   const last = s.last_gesture;
   if (last && s.now - last.at < 5) state += `  ·  ${GESTES[last.name] || last.name} !`;
-  if (running) say(`Opal voit : ${state}`);
+  if (running && Date.now() > spokeUntil) say(`Opal voit : ${state}`);
 }
 
 async function vision() {

@@ -266,6 +266,25 @@ class CameraHub:
         if self._watchdog is None or self._watchdog.done():
             self._watchdog = asyncio.create_task(self._presence_watchdog())
 
+    async def speak(self, tts: Any, sentences: list[str], rate: int) -> int:
+        """Fait parler Opal par la page caméra (iPhone / Mac) : texte puis PCM 16 bits.
+
+        Rend le nombre d'appareils qui l'ont dit (0 : aucune page caméra ouverte)."""
+        pages = [ws for ws, hello in self._sources if hello.get("sensor") == "navigateur"]
+        if not pages or not sentences:
+            return 0
+        page = pages[-1]  # la plus récente : celle qui sert de caméra
+        for sentence in sentences:
+            pcm = await tts.synthesize(sentence)
+            if not pcm:
+                continue
+            try:
+                await page.send(json.dumps({"type": "say", "text": sentence, "rate": rate}))
+                await page.send(pcm)
+            except Exception:
+                return 0
+        return 1
+
     def _preferred_source(self) -> tuple[Any, dict[str, Any]]:
         """Une page « envoyer » ouverte (iPhone, Mac) passe toujours avant l'ESP32-CAM,
         même si celle-ci se reconnecte après ; sinon la source la plus récente."""

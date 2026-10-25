@@ -71,6 +71,7 @@ from aiohttp import web
 
 import vision
 from activity import OpalActivity
+from initiative import SPOKEN, Initiative, Scene, duration, is_silent
 from camera import CameraHub
 from rhythm import DayRhythm
 from logs import log
@@ -92,7 +93,16 @@ GREETING_PROMPT = (
 )
 GREETING_NAMED_PROMPT = (
     "[Opal Box] Ta caméra vient de reconnaître {name}, qui arrive devant toi. "
-    "Salue-le par son prénom en une phrase courte et naturelle, sans poser de question."
+    "Salue-le en une phrase courte et naturelle, sans poser de question."
+)
+BACK_PROMPT = (
+    "[Opal Box] {name} revient devant toi après {away} d'absence. Accueille-le et, s'il y a "
+    "du nouveau d'important pour lui (messages, rappels, agenda proche), dis-le en bref."
+)
+BACK_AFTER_S = float(os.environ.get("OPAL_BACK_AFTER_MIN", "120")) * 60
+BRIEFING_PROMPT = (
+    "[Opal Box] {name} arrive ce matin. Voici son briefing du jour :\n{text}\n"
+    "Dis-lui l'essentiel en trois phrases maximum."
 )
 # Gestes musique : 👌 lance la playlist, bras croisés en X mettent en pause. Ce sont des
 # recettes d'Opal (rejouées sans IA, instantanées) : « Opal musique » ouvre sur le PC la
@@ -202,6 +212,10 @@ class OpalBridge:
         self._owner_here = False
         self._guarding = False
         self._woke_pc_at = -WAKE_COOLDOWN_S
+        self.initiative = Initiative(self.rhythm)
+        self._initiative_check = 0.0
+        self._saying = False
+        self._left_at = 0.0  # départ de la dernière personne (monotonic)
 
     def set_pending_confirmation(self, confirm_id: str | None) -> None:
         self.pending_confirmation = confirm_id
@@ -383,7 +397,9 @@ class OpalBridge:
             await self.node.send_event(event, data)
         await self.update_sleep()
         if not present:
+            self._left_at = time.monotonic()
             return
+        away = time.monotonic() - self._left_at if self._left_at else 0.0
         log("arrival", person=who if knows_faces else "?")
         if stranger:  # regard méfiant, pas de salutation
             await self.send_to_devices({"type": "eyes", "mood": "angry", "look": [0, 0],
@@ -395,23 +411,23 @@ class OpalBridge:
         # Première arrivée du matin : le briefing remplace la salutation.
         if self.rhythm.is_morning() and self._briefing_day != self.rhythm.today():
             self._briefing_day = self.rhythm.today()
-            asyncio.create_task(self._morning_briefing())
+            asyncio.create_task(self._morning_briefing(who))
             return
         now = time.monotonic()
-        if self._greet and self._devices and now - self._last_greeting > self._greet_cooldown:
+        if self._greet and now - self._last_greeting > self._greet_cooldown:
             self._last_greeting = now
-            asyncio.create_task(self._greet_visitor(who))
+            asyncio.create_task(self._greet_visitor(who, away))
 
-    async def _morning_briefing(self) -> None:
+    async def _morning_briefing(self, who: str | None) -> None:
+        self.initiative.spoke()
         try:
             text = await self._iris.briefing()
         except Exception as exc:
             log("briefing_failed", error=str(exc))
             return
         log("briefing", chars=len(text))
-        for ws in list(self._devices):
-            await self._speak(ws, text)
-            await self._send(ws, type="state", value="idle")
+        await self.say(BRIEFING_PROMPT.format(name=who or "l'utilisateur", text=text[:3000]),
+                       "briefing")
 
     async def note_activity(self, cmd: dict[str, object]) -> int:
         """Expression venue de l'activité d'Opal : réveille la boîte si elle dormait."""
@@ -462,6 +478,12 @@ class OpalBridge:
         # Tenu 4 s, renouvelé toutes les secondes : fâché tant que l'inconnu est là.
         if stranger:
             await self.send_to_devices({"type": "eyes", "mood": "angry", "hold_ms": 4000})
+        # Toutes les 5 s : y a-t-il une raison de parler spontanément ?
+        if now - self._initiative_check >= 5:
+            self._initiative_check = now
+            prompt = self.initiative.observe(Scene(cams.present, who, self._asleep))
+            if prompt:
+                asyncio.create_task(self.say(prompt, "initiative"))
 
     async def _wake_pc(self, who: str) -> None:
         now = time.monotonic()
@@ -484,17 +506,41 @@ class OpalBridge:
             await self.update_sleep()
             await asyncio.sleep(20)
 
-    async def _greet_visitor(self, name: str | None = None) -> None:
-        prompt = GREETING_NAMED_PROMPT.format(name=name) if name else GREETING_PROMPT
+    async def _greet_visitor(self, name: str | None = None, away: float = 0.0) -> None:
+        if name and away > BACK_AFTER_S:
+            prompt = BACK_PROMPT.format(name=name, away=duration(away))
+        else:
+            prompt = GREETING_NAMED_PROMPT.format(name=name) if name else GREETING_PROMPT
+        await self.say(prompt, "greeting")
+
+    async def say(self, prompt: str, kind: str) -> None:
+        """Opal parle de lui-même, à voix haute par l'iPhone / le Mac caméra, sinon la boîte.
+
+        Une seule prise de parole à la fois ; « RIEN » = Opal a choisi de se taire."""
+        if self._saying:
+            log("say_skipped", kind=kind)
+            return
+        self._saying = True
+        self.initiative.spoke()
         try:
+            if SPOKEN not in prompt:
+                prompt += SPOKEN
             answer = await self._iris.ask(prompt)
         except Exception as exc:
-            log("greeting_failed", error=str(exc))
+            log("say_failed", kind=kind, error=str(exc))
             return
-        log("greeting", text=answer)
-        for ws in list(self._devices):
-            await self._speak(ws, answer)
-            await self._send(ws, type="state", value="idle")
+        finally:
+            self._saying = False
+        if is_silent(answer):
+            log("say_silent", kind=kind)
+            return
+        sentences = speech_script(answer)
+        heard = await self.cams.speak(self._tts, sentences, TTS_RATE)
+        log("say", kind=kind, heard_by=heard, text=answer[:200])
+        if not heard:
+            for ws in list(self._devices):
+                await self._speak(ws, answer)
+                await self._send(ws, type="state", value="idle")
 
     async def send_to_devices(self, payload: dict[str, object]) -> int:
         """Envoie un message à tous les boîtiers connectés ; retourne leur nombre."""
