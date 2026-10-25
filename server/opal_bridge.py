@@ -53,6 +53,7 @@ import argparse
 import asyncio
 import hmac
 import json
+import math
 import os
 import re
 import sys
@@ -71,13 +72,14 @@ from websockets.http11 import Request, Response
 from aiohttp import web
 
 import vision
+import weather
 from activity import OpalActivity
 import posture
 from initiative import SPOKEN, Initiative, Scene, duration, is_silent
 from camera import CameraHub
 from rhythm import DayRhythm
 from logs import log
-from node import OpalNode, eyes_command
+from node import SCENES, OpalNode, eyes_command
 from voice import MIC_RATE, TTS_RATE, Speaker, Transcriber
 from web import make_app
 
@@ -116,6 +118,14 @@ COMFORT_PROMPT = (
     "gentil et discret, sans insister ni poser de question intrusive."
 )
 COMFORT_COOLDOWN_S = 3600.0
+# Animations des écrans : une animation plus importante n'est pas remplacée par une moindre
+# (le minuteur choisi par Opal reste, même si Opal se met à réfléchir).
+SCENE_PRIORITY = {"ambient": 0, "auto": 1, "reaction": 2, "manual": 3}
+CLOCK_AFTER_S = 180.0  # personne devant la caméra depuis 3 min : horloge de bureau
+# Gardien des PC : un inconnu seul devant la caméra pendant GUARD_LOCK_AFTER_S → verrouillage.
+GUARD_ENABLED = os.environ.get("OPAL_GUARD_ENABLED", "1") == "1"
+GUARD_LOCK_AFTER_S = float(os.environ.get("OPAL_GUARD_LOCK_AFTER_S", "30"))
+HEARTS_EVERY_S = 180.0  # au plus un cœur de sourire toutes les 3 min
 BRIEFING_PROMPT = (
     "[Opal Box] {name} arrive ce matin. Voici son briefing du jour :\n{text}\n"
     "Dis-lui l'essentiel en trois phrases maximum."
@@ -198,6 +208,50 @@ class IrisClient:
         await self._client.aclose()
 
 
+class GuardHub:
+    """File de commandes verrouiller / déverrouiller vers les agents de PC (attente longue).
+
+    L'agent de chaque machine fait un GET /opal/cam/guard/poll qui attend ici jusqu'à ce
+    qu'une commande arrive (ou 25 s), puis la rejoue. L'enforcement est dans l'agent ;
+    le pont ne décide que du moment, à partir de la caméra (jamais l'IA)."""
+
+    def __init__(self) -> None:
+        self._pending: dict[str, list[dict[str, object]]] = {}
+        self._waiters: dict[str, asyncio.Event] = {}
+        self.locked: dict[str, bool] = {}
+        self.seen: dict[str, float] = {}
+
+    async def poll(self, machine: str, timeout: float = 25) -> dict[str, object] | None:
+        self.seen[machine] = time.time()
+        queue = self._pending.setdefault(machine, [])
+        if not queue:
+            event = self._waiters.setdefault(machine, asyncio.Event())
+            event.clear()
+            try:
+                await asyncio.wait_for(event.wait(), timeout)
+            except asyncio.TimeoutError:
+                return None
+        return queue.pop(0) if queue else None
+
+    def note_state(self, machine: str, locked: bool) -> None:
+        self.seen[machine] = time.time()
+        self.locked[machine] = locked
+
+    def online(self) -> list[str]:
+        now = time.time()
+        return [m for m, t in self.seen.items() if now - t < 60]
+
+    def send(self, cmd: str, reason: str = "") -> int:
+        """Envoie la commande à toutes les machines vues récemment ; retourne leur nombre."""
+        targets = self.online()
+        for machine in targets:
+            self._pending.setdefault(machine, []).append({"cmd": cmd, "reason": reason})
+            if machine in self._waiters:
+                self._waiters[machine].set()
+        log("guard_command", cmd=cmd, machines=len(targets))
+        return len(targets)
+
+
 class OpalBridge:
     def __init__(
         self, iris: IrisClient, stt: Transcriber, tts: Speaker, device_token: str
@@ -236,6 +290,12 @@ class OpalBridge:
         self._saying = False
         self._left_at = 0.0  # départ de la dernière personne (monotonic)
         self._sad_seen: deque[float] = deque(maxlen=6)
+        self._scene: tuple[str | None, float] = (None, 0.0)  # (genre, fin) de l'animation affichée
+        self._clock_on = False
+        self._hearts_at = -HEARTS_EVERY_S
+        self.guard = GuardHub()
+        self._pc_locked = False
+        self._stranger_since = 0.0
         self._comforted_at = -COMFORT_COOLDOWN_S
 
     def set_pending_confirmation(self, confirm_id: str | None) -> None:
@@ -313,12 +373,54 @@ class OpalBridge:
                 return False, "Indique une direction ou un geste."
             sent = await self.send_to_devices(cmd)
             return (True, "Tête : c'est fait.") if sent else (False, "Opal Box n'est pas connectée.")
+        if tool == "opal_box_ecran":
+            return await self._screen_tool(args)
+        if tool == "opal_box_verrouiller":
+            reason = str(args.get("raison") or "Verrouillage demandé")
+            n = self.guard.send("lock", reason)
+            if not n:
+                return False, "Aucun PC avec l'agent de verrouillage n'est en ligne."
+            self._pc_locked = True
+            await self.send_to_devices({"type": "eyes", "style": "gardien", "hold_ms": 0})
+            return True, f"{n} PC verrouillé(s). Déverrouillage quand tu reconnais le propriétaire ou par son code."
         if tool == "opal_box_oublier_visage":
             name = str(args.get("nom") or "").strip()
             if self.cams.faces is None or not self.cams.faces.forget(name):
                 return False, f"Je ne connais pas le visage de {name}."
             return True, f"J'ai oublié le visage de {name}."
         return False, f"Outil inconnu : {tool}"
+
+    async def _screen_tool(self, args: dict[str, object]) -> tuple[bool, str]:
+        """Outil opal_box_ecran : animation plein écran et/ou style des yeux."""
+        if not self._devices:
+            return False, "Les écrans d'Opal Box ne sont pas connectés."
+        done = []
+        if (style := args.get("style")) in ("opale", "gardien"):
+            await self.send_to_devices({"type": "eyes", "style": style, "hold_ms": 1})
+            done.append(f"style {style}")
+        name = str(args.get("animation") or "")
+        ms = int(float(str(args.get("duree_s", 10))) * 1000)
+        if name == "yeux":
+            self._scene = (None, 0.0)
+            await self.send_to_devices({"type": "scene", "name": "aucune"})
+            done.append("retour aux yeux")
+        elif name == "meteo":
+            if not await self.show_weather(ms):
+                return False, "Météo indisponible pour le moment."
+            done.append("météo")
+        elif name in SCENES:
+            data: dict[str, object] = {}
+            if name == "minuteur":
+                data["minutes"] = float(str(args.get("minutes") or 25))
+            if args.get("texte"):
+                data["label"] = weather.ascii_text(str(args["texte"]))[:23]
+            if args.get("nombre") is not None:
+                data["count"] = int(str(args["nombre"]))
+            await self.show_scene(name, ms, "manual", **data)
+            done.append(f"{name} {data['minutes']:g} min" if name == "minuteur" else name)
+        if not done:
+            return False, "Indique une animation ou un style."
+        return True, "Écrans : " + ", ".join(done) + "."
 
     async def _on_gaze(self, x: float, y: float) -> None:
         now = time.monotonic()
@@ -346,6 +448,8 @@ class OpalBridge:
             )
             if play:
                 await self.send_to_devices({"type": "head", "gesture": "wiggle"})
+            else:
+                await self.show_scene("aucune", kind="reaction")
             asyncio.create_task(self._music(gesture))
             return
         approved = gesture == "pouce_haut"
@@ -362,6 +466,8 @@ class OpalBridge:
             reaction = {"type": "eyes", "mood": "sad", "look": [0, 0.6], "pupil": 0.15,
                         "blink": True, "hold_ms": 4000}
         sent = await self.send_to_devices(reaction)
+        # Cœurs pour un pouce levé, spirales « étourdi » pour un pouce baissé.
+        await self.show_scene("coeurs" if approved else "etourdi", 4000 if approved else 2500, "reaction")
         # Le cou suit : balancement content, ou « non » de la tête.
         await self.send_to_devices({"type": "head", "gesture": "wiggle" if approved else "shake"})
         log("gesture_reaction", gesture=gesture, devices=sent)
@@ -386,6 +492,8 @@ class OpalBridge:
         except Exception as exc:
             ok, summary = False, str(exc)
         log("music", gesture=gesture, ok=ok, text=summary[:200])
+        if ok and gesture == "ok":
+            await self.show_scene("musique", 10000, "reaction")
         if not ok:
             await self.send_to_devices({"type": "eyes", "mood": "sad", "hold_ms": 2500})
 
@@ -393,6 +501,10 @@ class OpalBridge:
         if self._guarding or self._asleep or (eyes := EXPRESSION_EYES.get(expression)) is None:
             return
         await self.send_to_devices({"type": "eyes", **eyes})
+        now = time.monotonic()
+        if expression == "happy" and now - self._hearts_at > HEARTS_EVERY_S:
+            self._hearts_at = now
+            await self.show_scene("coeurs", 3000, "reaction")
         if expression not in ("sad", "fearful"):
             return
         # Triste plusieurs fois en quelques minutes : Opal dit un mot gentil (1 fois/heure).
@@ -463,6 +575,7 @@ class OpalBridge:
 
     async def _morning_briefing(self, who: str | None) -> None:
         self.initiative.spoke()
+        asyncio.create_task(self.show_weather(12000, "reaction"))
         try:
             text = await self._iris.briefing()
         except Exception as exc:
@@ -476,7 +589,28 @@ class OpalBridge:
         """Expression venue de l'activité d'Opal : réveille la boîte si elle dormait."""
         self._last_activity = time.monotonic()
         await self.update_sleep()
+        if cmd.get("type") == "scene":
+            return await self.show_scene(str(cmd.get("name")), int(cmd.get("ms") or 0), "auto")
         return await self.send_to_devices(cmd)
+
+    async def show_scene(self, name: str, ms: int = 8000, kind: str = "manual", **data: object) -> int:
+        """Animation plein écran sur la boîte (« aucune » = retour aux yeux), selon sa priorité."""
+        now = time.monotonic()
+        current, until = self._scene
+        if current is not None and now < until and SCENE_PRIORITY[kind] < SCENE_PRIORITY[current]:
+            return 0
+        if name == "aucune":
+            if current is None and kind == "auto":
+                return 0  # rien d'affiché : pas besoin de déranger les yeux
+            self._scene = (None, 0.0)
+        else:
+            if name == "minuteur" and data.get("minutes"):
+                until = now + float(str(data["minutes"])) * 60
+            else:
+                until = now + ms / 1000 if ms else math.inf
+            self._scene = (kind, until)
+        self._clock_on = self._clock_on and name == "horloge"
+        return await self.send_to_devices({"type": "scene", "name": name, "ms": ms, **data})
 
     async def update_sleep(self) -> None:
         """La nuit, sans personne devant la caméra ni activité récente : la boîte dort."""
@@ -510,6 +644,15 @@ class OpalBridge:
                 asyncio.create_task(self._wake_pc(who))
         elif not cams.present:
             self._owner_here = False
+        # Horloge de bureau : personne depuis 3 min (caméra active, boîte éveillée).
+        idle_clock = bool(cams.online and not cams.present and not self._asleep
+                          and self._left_at and now - self._left_at > CLOCK_AFTER_S)
+        if idle_clock and not self._clock_on:
+            if await self.show_scene("horloge", 0, "ambient"):
+                self._clock_on = True
+        elif not idle_clock and self._clock_on:
+            self._clock_on = False
+            await self.show_scene("aucune", kind="ambient")
         knows_faces = bool(cams.faces and cams.faces.people)
         stranger = (
             cams.present and knows_faces and who == "" and len(cams.votes) >= 3
@@ -518,6 +661,7 @@ class OpalBridge:
         if stranger != self._guarding:
             self._guarding = stranger
             log("guard", stranger=stranger)
+        await self._guard_pc(stranger, bool(who), now)
         # Tenu 4 s, renouvelé toutes les secondes : fâché tant que l'inconnu est là.
         if stranger:
             await self.send_to_devices({"type": "eyes", "mood": "angry", "hold_ms": 4000})
@@ -532,6 +676,36 @@ class OpalBridge:
             log("posture", advice=advice)
             await self.send_to_devices({"type": "eyes", "mood": "surprised", "hold_ms": 1500})
             asyncio.create_task(self.say(posture.PROMPTS[advice].format(name=who), "posture"))
+
+    async def show_weather(self, ms: int = 10000, kind: str = "manual") -> int:
+        try:
+            data = await weather.today()
+        except Exception as exc:
+            log("weather_failed", error=str(exc))
+            return 0
+        return await self.show_scene("meteo", ms, kind, **data)
+
+    async def _guard_pc(self, stranger: bool, owner_here: bool, now: float) -> None:
+        """Inconnu seul assez longtemps → verrouille les PC ; ton retour → déverrouille."""
+        if not GUARD_ENABLED:
+            return
+        if owner_here:
+            self._stranger_since = 0.0
+            if self._pc_locked:
+                self._pc_locked = False
+                self.guard.send("unlock")
+                log("guard_unlock", reason="propriétaire reconnu")
+                await self.send_to_devices({"type": "eyes", "style": "opale", "hold_ms": 1})
+            return
+        if stranger and not self._pc_locked:
+            self._stranger_since = self._stranger_since or now
+            if now - self._stranger_since >= GUARD_LOCK_AFTER_S:
+                if self.guard.send("lock", "Inconnu devant Opal pendant ton absence"):
+                    self._pc_locked = True
+                    log("guard_lock", seconds=round(now - self._stranger_since))
+                    await self.send_to_devices({"type": "eyes", "style": "gardien", "hold_ms": 0})
+        elif not stranger:
+            self._stranger_since = 0.0
 
     async def _wake_pc(self, who: str) -> None:
         now = time.monotonic()
@@ -775,8 +949,10 @@ async def run(host: str, port: int, device_token: str) -> None:
     await stt.warm_up()
 
     runner: web.AppRunner | None = None
+    guard_token = secret("OPAL_GUARD_TOKEN", "/run/secrets/opal_guard_token")
     if viewer_password := os.environ.get("OPAL_VIEWER_PASSWORD", ""):
-        runner = web.AppRunner(make_app(bridge.cams, viewer_password, iris_token(), bridge._update_node), access_log=None)
+        runner = web.AppRunner(make_app(bridge.cams, viewer_password, iris_token(), bridge._update_node,
+                 bridge._screen_tool, bridge.guard, guard_token), access_log=None)
         await runner.setup()
         await web.TCPSite(runner, host, port + 1).start()
         log("camera_web_ready", url=f"http://{host}:{port + 1}/opal/cam")

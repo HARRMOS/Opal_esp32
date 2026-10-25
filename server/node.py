@@ -166,12 +166,66 @@ HEAD_TOOL = {
     },
 }
 
-TOOLS = [EYES_TOOL, PHOTO_TOOL, PRESENCE_TOOL, LEARN_FACE_TOOL, FORGET_FACE_TOOL, HEAD_TOOL]
+# Animations plein écran des deux écrans (voir firmware/src/scenes.cpp).
+SCENES = ["coeurs", "horloge", "meteo", "musique", "reflexion", "minuteur", "sommeil",
+          "message", "etourdi", "matrix", "demarrage"]
+
+SCREEN_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "opal_box_ecran",
+        "description": (
+            "Affiche une animation sur les deux écrans d'Opal Box à la place des yeux, ou change "
+            "le style des yeux. Animations : coeurs (affection, bravo), horloge (heure), meteo "
+            "(météo réelle du jour), musique, reflexion, minuteur (compte à rebours de "
+            "« minutes », ex. pomodoro), sommeil, message (« nombre » de messages, « texte » "
+            "sous le nombre), etourdi, matrix, demarrage. « yeux » revient aux yeux. Style : "
+            "opale (yeux normaux) ou gardien (objectif rouge qui surveille)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "animation": {"type": "string", "enum": [*SCENES, "yeux"]},
+                "duree_s": {
+                    "type": "number",
+                    "description": "Durée en secondes (défaut 10 ; 0 = jusqu'à nouvel ordre). "
+                                   "Ignorée pour le minuteur, qui s'arrête seul.",
+                },
+                "minutes": {"type": "number", "description": "Durée du minuteur."},
+                "texte": {"type": "string", "description": "Titre du minuteur ou légende du message."},
+                "nombre": {"type": "integer", "description": "Nombre affiché par « message »."},
+                "style": {"type": "string", "enum": ["opale", "gardien"]},
+            },
+        },
+    },
+}
+
+LOCK_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "opal_box_verrouiller",
+        "description": (
+            "Verrouille les ordinateurs du propriétaire (écran de garde Opal) quand tu juges "
+            "qu'il faut protéger l'accès : par exemple s'il te le demande, ou si tu vois un "
+            "inconnu seul. Le déverrouillage ne passe PAS par toi : il se fait quand ta caméra "
+            "reconnaît le propriétaire, ou avec son code secret tapé sur le PC. Tu ne peux donc "
+            "pas déverrouiller toi-même."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"raison": {"type": "string", "description": "Pourquoi tu verrouilles."}},
+        },
+    },
+}
+
+TOOLS = [EYES_TOOL, PHOTO_TOOL, PRESENCE_TOOL, LEARN_FACE_TOOL, FORGET_FACE_TOOL, HEAD_TOOL,
+         SCREEN_TOOL, LOCK_TOOL]
 
 ENVIRONMENT = (
     "## OPAL BOX\n"
     "« opal-box » n'est pas un ordinateur : c'est ton corps physique posé chez l'utilisateur, "
-    "avec deux yeux animés (opal_box_yeux), une tête qui tourne (opal_box_tete) et une "
+    "avec deux yeux animés (opal_box_yeux) qui peuvent aussi afficher des animations "
+    "(opal_box_ecran : horloge, météo, minuteur, cœurs…), une tête qui tourne (opal_box_tete) et une "
     "caméra (opal_box_photo, opal_box_presence, "
     "opal_box_memoriser_visage, opal_box_oublier_visage : elle reconnaît les visages appris). "
     "Ne lui envoie jamais d'outil d'ordinateur (apps, fichiers, navigateur). Tes yeux suivent "

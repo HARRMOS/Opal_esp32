@@ -16,7 +16,8 @@ import time
 from collections import defaultdict, deque
 from urllib.parse import urlsplit
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from aiohttp import WSMsgType, web
 
@@ -316,6 +317,9 @@ def make_app(
     password: str,
     iris_token: str = "",
     on_sources_changed: Callable[[], None] | None = None,
+    on_screen: Callable[[dict], Awaitable[tuple[bool, str]]] | None = None,
+    guard: "Any" = None,
+    guard_token: str = "",
 ) -> web.Application:
     session = (
         hmac.new(iris_token.encode(), b"iris-session-v1", hashlib.sha256).hexdigest()
@@ -347,6 +351,16 @@ def make_app(
         if origin and urlsplit(origin).netloc != request.host:
             log("cam_origin_refused", origin=origin[:80], ip=client_ip(request))
             return web.Response(status=403, text="Origine refusée.")
+        header = request.headers.get("Authorization", "")
+        # L'agent de verrouillage présente le jeton du gardien, et n'ouvre que ses routes.
+        if request.path.startswith("/opal/cam/guard"):
+            given = header[7:] if header.startswith("Bearer ") else ""
+            if guard_token and hmac.compare_digest(given.encode(), guard_token.encode()):
+                return await handler(request)
+            ip, now = client_ip(request), time.monotonic()
+            if not blocked(ip, now):
+                failures[ip].append(now)
+            return web.Response(status=401, text="Jeton du gardien requis.")
         cookie = request.cookies.get("iris_session", "")
         if session and cookie and hmac.compare_digest(cookie, session):
             return await secure(await handler(request))
@@ -354,7 +368,6 @@ def make_app(
         ip, now = client_ip(request), time.monotonic()
         if blocked(ip, now):
             return web.Response(status=429, text="Trop d'essais, réessaie plus tard.")
-        header = request.headers.get("Authorization", "")
         if header.startswith("Basic "):
             try:
                 _, _, given = base64.b64decode(header[6:]).decode().partition(":")
@@ -412,6 +425,36 @@ def make_app(
                 on_sources_changed()
         return ws
 
+    async def screen(request: web.Request) -> web.Response:
+        """Animation des écrans d'Opal Box (mêmes champs que l'outil opal_box_ecran)."""
+        if on_screen is None:
+            return web.Response(status=404)
+        try:
+            args = await request.json()
+        except ValueError:
+            return web.json_response({"ok": False, "text": "JSON attendu."}, status=400)
+        ok, text = await on_screen(args if isinstance(args, dict) else {})
+        return web.json_response({"ok": ok, "text": text}, status=200 if ok else 409)
+
+    async def guard_poll(request: web.Request) -> web.Response:
+        """Attente longue : rend la prochaine commande (lock/unlock) pour cette machine."""
+        if guard is None:
+            return web.json_response({"cmd": "none"})
+        machine = request.query.get("machine", "?")[:40]
+        cmd = await guard.poll(machine)
+        return web.json_response(cmd or {"cmd": "none"}, headers={"Cache-Control": "no-store"})
+
+    async def guard_state(request: web.Request) -> web.Response:
+        """L'agent signale s'il a bien verrouillé / déverrouillé."""
+        if guard is None:
+            return web.json_response({"ok": False})
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        guard.note_state(str(body.get("machine", "?"))[:40], bool(body.get("locked")))
+        return web.json_response({"ok": True})
+
     async def photo(_: web.Request) -> web.Response:
         if cams.frame is None:
             return web.Response(status=503, text="Caméra hors ligne.")
@@ -466,4 +509,7 @@ def make_app(
     app.router.add_get("/opal/cam/envoyer", source_page)
     app.router.add_get("/opal/cam/source", source)
     app.router.add_get("/opal/cam/photos/{photo_id}.jpg", saved_photo)
+    app.router.add_post("/opal/cam/ecran", screen)
+    app.router.add_get("/opal/cam/guard/poll", guard_poll)
+    app.router.add_post("/opal/cam/guard/state", guard_state)
     return app
