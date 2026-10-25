@@ -150,6 +150,25 @@ appliqué sur le VPS le 2026-10-24). À réappliquer si Opal est redéployé dep
 autre copie de son code : `patch -p1 < iris-chat-photos.patch` dans le dossier d'Iris,
 puis `docker compose -p iris up -d --build iris` dans `Iris/deploy`.
 
+## Comportements d'Opal Box
+
+- **Reflet d'Opal** : le pont suit le flux temps réel de l'interface d'Opal (`/ws`).
+  Quel que soit l'appareil où on lui parle, les yeux deviennent attentifs, regardent
+  en l'air quand il réfléchit, se concentrent quand il agit sur un ordinateur, prennent
+  l'émotion de sa réponse, réagissent aux erreurs, confirmations et notifications.
+- **Rythme** (heure de Paris) : la nuit (`OPAL_NIGHT`, 23:00-07:00), sans personne ni
+  activité depuis 2 min, la boîte dort (paupières closes, écran assombri). Première
+  arrivée du matin (`OPAL_MORNING`, 05:00-12:00) : briefing d'Opal.
+- **Visages** : « Opal, retiens mon visage, je m'appelle … » (outil
+  `opal_box_memoriser_visage`). Seules des empreintes SFace sont gardées, sur le VPS
+  (`deploy/models/faces.json`). Prénom dans la salutation ; inconnu = regard méfiant et
+  événement `inconnu_devant_opal_box` avec photo (à transformer en notification par un
+  déclencheur « sur événement » dans Opal).
+- **Gestes** : main ouverte = coucou ; pouce levé / baissé = valide / refuse la
+  confirmation d'Opal en attente.
+- **iPhone ou Mac comme caméra** : https://iris.inoma.pro/opal/cam/envoyer, bouton
+  Démarrer. L'appareil remplace l'ESP32-CAM tant que la page est ouverte.
+
 ## 1. Le pont sur le VPS (Docker + Traefik)
 
 Le pont (`server/`) ne contient pas de cerveau : il transcrit la voix en local
