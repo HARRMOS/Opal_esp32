@@ -67,6 +67,7 @@ from websockets.http11 import Request, Response
 from aiohttp import web
 
 import vision
+from activity import OpalActivity
 from camera import CameraHub
 from logs import log
 from node import OpalNode, eyes_command
@@ -144,6 +145,10 @@ class OpalBridge:
         self._last_greeting = 0.0
         self._greet = os.environ.get("OPAL_GREET", "1") == "1"
         self._public_url = os.environ.get("OPAL_PUBLIC_URL", "https://iris.inoma.pro").rstrip("/")
+        self.pending_confirmation: str | None = None  # validable d'un pouce levé
+
+    def set_pending_confirmation(self, confirm_id: str | None) -> None:
+        self.pending_confirmation = confirm_id
         self._greet_cooldown = float(os.environ.get("OPAL_GREET_COOLDOWN_S", "3600"))
 
     def _update_node(self) -> None:
@@ -396,6 +401,13 @@ async def run(host: str, port: int, device_token: str) -> None:
     iris = IrisClient(iris_url, iris_token())
     stt = Transcriber()
     bridge = OpalBridge(iris, stt, Speaker(), device_token)
+    activity = OpalActivity(
+        iris_url.replace("http", "ws", 1).rstrip("/") + "/ws",
+        iris_token(),
+        bridge.send_to_devices,
+        bridge.set_pending_confirmation,
+    )
+    activity.start()
     if node_token := iris_node_token():
         node_url = iris_url.replace("http", "ws", 1).rstrip("/") + "/node"
         bridge.node = OpalNode(node_url, node_token, bridge.handle_tool)
