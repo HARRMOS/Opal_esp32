@@ -237,6 +237,17 @@ class OpalBridge:
             await self.send_to_devices({"type": "eyes", "mood": "happy", "blink": True,
                                         "hold_ms": 3000})
             return True, f"Visage de {name} mémorisé ({count} images). Je le reconnaîtrai."
+        if tool == "opal_box_tete":
+            cmd: dict[str, object] = {"type": "head"}
+            looks = {"gauche": -0.8, "droite": 0.8, "centre": "center", "libre": "auto"}
+            if (direction := args.get("direction")) in looks:
+                cmd["look"] = looks[str(direction)]
+            if (geste := args.get("geste")) in ("non", "content"):
+                cmd["gesture"] = "shake" if geste == "non" else "wiggle"
+            if len(cmd) == 1:
+                return False, "Indique une direction ou un geste."
+            sent = await self.send_to_devices(cmd)
+            return (True, "Tête : c'est fait.") if sent else (False, "Opal Box n'est pas connectée.")
         if tool == "opal_box_oublier_visage":
             name = str(args.get("nom") or "").strip()
             if self.cams.faces is None or not self.cams.faces.forget(name):
@@ -259,6 +270,7 @@ class OpalBridge:
         if gesture == "main_ouverte":
             await self.send_to_devices({"type": "eyes", "mood": "happy", "wink": 1, "look": [0, 0],
                                         "hold_ms": 2500})
+            await self.send_to_devices({"type": "head", "gesture": "wiggle"})
             return
         approved = gesture == "pouce_haut"
         if self.pending_confirmation:
@@ -274,6 +286,8 @@ class OpalBridge:
             reaction = {"type": "eyes", "mood": "sad", "look": [0, 0.6], "pupil": 0.15,
                         "blink": True, "hold_ms": 4000}
         sent = await self.send_to_devices(reaction)
+        # Le cou suit : balancement content, ou « non » de la tête.
+        await self.send_to_devices({"type": "head", "gesture": "wiggle" if approved else "shake"})
         log("gesture_reaction", gesture=gesture, devices=sent)
 
     async def _on_recording(self, on: bool) -> None:

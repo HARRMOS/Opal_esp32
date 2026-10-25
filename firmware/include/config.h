@@ -39,6 +39,14 @@
 #define EYE_L_ROTATION 0      // 0-3 selon le montage des écrans
 #define EYE_R_ROTATION 0
 
+// Cou : un servo MG90S tourne la tête de gauche à droite.
+// Fil orange -> HEAD_PAN_PIN ; rouge -> 5V (pas le 3V3 de l'S3) ; marron -> GND commun.
+#define HEAD_PAN_PIN 38
+#define HEAD_PAN_CENTER_US 1500   // impulsion « tête droite » (régler si la tête est de travers)
+#define HEAD_PAN_RANGE_US 550     // course de chaque côté (~50°) ; réduire si le servo force
+#define HEAD_PAN_INVERT false     // la tête tourne du mauvais côté ? passer à true
+#define HEAD_FOLLOW 0.8f          // part du regard prise par la tête (le reste : les yeux)
+
 // ---------------------------------------------------------------------------
 // Audio
 // ---------------------------------------------------------------------------

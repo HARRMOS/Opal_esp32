@@ -150,6 +150,19 @@ appliqué sur le VPS le 2026-10-24). À réappliquer si Opal est redéployé dep
 autre copie de son code : `patch -p1 < iris-chat-photos.patch` dans le dossier d'Iris,
 puis `docker compose -p iris up -d --build iris` dans `Iris/deploy`.
 
+## Cou (servo MG90S)
+
+Un servo tourne la tête de gauche à droite : fil orange sur le **GPIO 38**, rouge sur
+un **5V** (pas le 3V3 de l'S3 ; le 5V d'un Arduino suffit pour un MG90S), marron sur
+un GND relié au GND de l'S3. Au démarrage la tête se met au centre : c'est le moment de
+visser le palonnier bien droit. Réglages dans [firmware/include/config.h](firmware/include/config.h) :
+`HEAD_PAN_INVERT` (tourne du mauvais côté), `HEAD_PAN_CENTER_US` (tête de travers),
+`HEAD_PAN_RANGE_US` (le servo force en bout de course).
+
+La tête suit le visage (les yeux font le reste), jette des coups d'œil quand personne
+n'est là, revient au centre la nuit, fait « non » sur un pouce baissé et se balance sur
+un pouce levé ou une main ouverte. Opal la pilote avec l'outil `opal_box_tete`.
+
 ## Comportements d'Opal Box
 
 - **Reflet d'Opal** : le pont suit le flux temps réel de l'interface d'Opal (`/ws`).

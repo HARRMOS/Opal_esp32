@@ -13,6 +13,7 @@
 #include "ca_certs.h"
 #include "config.h"
 #include "eyes.h"
+#include "head.h"
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
@@ -203,7 +204,10 @@ static void onText(const uint8_t* payload, size_t length) {
   } else if (strcmp(type, "gaze") == 0) {
     // Regarder la personne, sauf si Opal impose une expression ou réfléchit.
     if (!eyesHeld && state != State::Thinking && state != State::Error) {
-      eyes::lookAt(doc["x"] | 0.f, doc["y"] | 0.f);
+      // La tête fait le gros du mouvement, les yeux le reste.
+      const float gx = doc["x"] | 0.f;
+      head::lookAt(gx * HEAD_FOLLOW);
+      eyes::lookAt(gx * (1 - HEAD_FOLLOW) * 1.5f, doc["y"] | 0.f);
       gazeUntil = millis() + GAZE_HOLD_MS;
     }
   } else if (strcmp(type, "camera_fx") == 0) {  // Opal prend une photo
@@ -211,8 +215,21 @@ static void onText(const uint8_t* payload, size_t length) {
     if (strcmp(phase, "aim") == 0) eyes::cameraAim();
     else if (strcmp(phase, "shoot") == 0) eyes::cameraShoot();
     else eyes::cameraDone();
+  } else if (strcmp(type, "head") == 0) {  // Opal ou le pont bouge la tête
+    const char* gesture = doc["gesture"] | "";
+    if (strcmp(gesture, "shake") == 0) head::shake();
+    else if (strcmp(gesture, "wiggle") == 0) head::wiggle();
+    JsonVariant look = doc["look"];
+    if (look.is<float>() || look.is<int>()) head::lookAt(look.as<float>());
+    else if (look.is<const char*>()) {
+      if (strcmp(look.as<const char*>(), "center") == 0) head::center();
+      else head::setIdle(true);
+    }
   } else if (strcmp(type, "sleep") == 0) {  // la nuit, sans personne devant la caméra
-    eyes::setAsleep(doc["on"] | false);
+    const bool asleep = doc["on"] | false;
+    eyes::setAsleep(asleep);
+    if (asleep) head::center();  // la tête revient doucement au centre pour dormir
+    else head::setIdle(true);
   } else if (strcmp(type, "recording") == 0) {  // quelqu'un regarde le direct
     eyes::setRecording(doc["on"] | false);
   } else if (strcmp(type, "presence") == 0) {
@@ -305,6 +322,7 @@ void setup() {
   Serial.printf("\nOpal — PSRAM %lu Ko libre\n", (unsigned long)(ESP.getFreePsram() / 1024));
 
   eyes::begin();  // les yeux tournent seuls, un œil par cœur
+  head::begin();  // tête au centre (moment de visser le palonnier bien droit)
   setState(State::Connecting);
 
   spkBuffer = xRingbufferCreateWithCaps(SPK_BUFFER_BYTES, RINGBUF_TYPE_BYTEBUF, MALLOC_CAP_SPIRAM);
@@ -358,10 +376,12 @@ void setup() {
 
 void loop() {
   ws.loop();
+  head::update();
   handleButton();
   if (eyesHeld && eyesHoldUntil && (int32_t)(millis() - eyesHoldUntil) >= 0) releaseEyes();
   if (gazeUntil && (int32_t)(millis() - gazeUntil) >= 0) {  // visage perdu : regard libre
     gazeUntil = 0;
+    head::setIdle(true);
     showEyes();
   }
   static uint32_t lastFps = 0;

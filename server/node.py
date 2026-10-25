@@ -147,12 +147,32 @@ FORGET_FACE_TOOL = {
     },
 }
 
-TOOLS = [EYES_TOOL, PHOTO_TOOL, PRESENCE_TOOL, LEARN_FACE_TOOL, FORGET_FACE_TOOL]
+HEAD_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "opal_box_tete",
+        "description": (
+            "Tourne la tête d'Opal Box (un servo, gauche-droite) ou fait un geste du cou : "
+            "« non » de la tête, ou petit balancement content. Gauche / droite vus par la "
+            "personne en face. « libre » : la tête suit de nouveau le visage toute seule."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "direction": {"type": "string", "enum": ["gauche", "droite", "centre", "libre"]},
+                "geste": {"type": "string", "enum": ["non", "content"]},
+            },
+        },
+    },
+}
+
+TOOLS = [EYES_TOOL, PHOTO_TOOL, PRESENCE_TOOL, LEARN_FACE_TOOL, FORGET_FACE_TOOL, HEAD_TOOL]
 
 ENVIRONMENT = (
     "## OPAL BOX\n"
     "« opal-box » n'est pas un ordinateur : c'est ton corps physique posé chez l'utilisateur, "
-    "avec deux yeux animés (opal_box_yeux) et une caméra (opal_box_photo, opal_box_presence, "
+    "avec deux yeux animés (opal_box_yeux), une tête qui tourne (opal_box_tete) et une "
+    "caméra (opal_box_photo, opal_box_presence, "
     "opal_box_memoriser_visage, opal_box_oublier_visage : elle reconnaît les visages appris). "
     "Ne lui envoie jamais d'outil d'ordinateur (apps, fichiers, navigateur). Tes yeux suivent "
     "seuls le visage de la personne en face. Utilise tes yeux avec naturel pour accompagner "
