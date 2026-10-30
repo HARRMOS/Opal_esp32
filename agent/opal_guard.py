@@ -500,6 +500,42 @@ def session_locked() -> bool:
         user32.CloseDesktop(ctypes.c_void_p(desk))
 
 
+def log(*parts: object) -> None:
+    print(time.strftime("%H:%M:%S"), *parts)
+
+
+def own_foreground() -> bool | None:
+    """La fenêtre au premier plan est-elle à nous ? None : aucune (écran sécurisé
+    Ctrl+Alt+Suppr, ou session verrouillée)."""
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    user32.GetForegroundWindow.restype = ctypes.c_void_p
+    fg = user32.GetForegroundWindow()
+    if not fg:
+        return None
+    pid = ctypes.c_ulong()
+    user32.GetWindowThreadProcessId(ctypes.c_void_p(fg), ctypes.byref(pid))
+    return pid.value == os.getpid()
+
+
+def take_focus(title: str) -> None:
+    """Met notre fenêtre au premier plan. Windows l'interdit d'ordinaire à un programme
+    d'arrière-plan (tâche planifiée) ; un appui simulé sur Alt lève cette interdiction."""
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    user32.FindWindowW.restype = ctypes.c_void_p
+    hwnd = user32.FindWindowW(None, title)
+    if not hwnd:
+        return
+    user32.keybd_event(0x12, 0, 0, 0)  # Alt enfoncé…
+    user32.keybd_event(0x12, 0, 2, 0)  # …puis relâché
+    user32.ShowWindow(ctypes.c_void_p(hwnd), 9)  # SW_RESTORE
+    user32.BringWindowToTop(ctypes.c_void_p(hwnd))
+    user32.SetForegroundWindow(ctypes.c_void_p(hwnd))
+
+
 class PageApi:
     """Seule fonction offerte à la page : vérifier le code (rien d'autre n'est exposé)."""
 
@@ -530,7 +566,6 @@ class WebGuard:
             "Opal Gardien", html=html, js_api=PageApi(self), hidden=True, focus=True,
             background_color="#07040a", width=1280, height=720,
             **({"screen": primary} if primary and not WINDOWED else {}), **full)
-        self.window.events.loaded += self._on_loaded
         self.window.events.closing += self._on_closing
         # Les autres moniteurs reçoivent un voile sombre : aucun ne doit rester utilisable.
         self.covers = [] if WINDOWED else [
@@ -543,12 +578,21 @@ class WebGuard:
     def _on_closing(self) -> bool:
         return not self.locked  # False : fermeture refusée tant que c'est verrouillé
 
-    def _on_loaded(self) -> None:
-        if not self.locked:
-            return
+    def _send_info(self) -> None:
+        """Raison, heure, longueur du code… La page vient d'être rechargée : on réessaie
+        jusqu'à ce qu'elle confirme les avoir reçues."""
         info = {"online": True, "machines": "PC · opal-box", "reason": self.reason,
                 "since": int(self.since * 1000), "codeLength": int(self.config.get("code_len", 0))}
-        self.window.evaluate_js(f"window.opal && window.opal.update({json.dumps(info)})")
+        script = f"window.opal ? (window.opal.update({json.dumps(info)}), true) : false"
+        for _ in range(20):
+            time.sleep(0.5)
+            if not self.locked:
+                return
+            try:
+                if self.window.evaluate_js(script):
+                    return
+            except Exception:  # noqa: BLE001  (page en cours de chargement)
+                pass
 
     def lock(self, reason: str = "") -> None:
         if self.locked:
@@ -559,13 +603,13 @@ class WebGuard:
             LOCK_FLAG.write_text(self.reason, encoding="utf-8")
         except OSError:
             pass
-        self.window.load_html(self.html)  # écran remis à neuf (déclenche « loaded »)
+        self.window.load_html(self.html)  # écran remis à neuf
         for w in (self.window, *self.covers):
             w.show()
-        # Une seconde et demie pour prendre la main avant de surveiller les fuites.
-        threading.Timer(1.5, lambda: setattr(self, "armed", self.locked)).start()
+        threading.Thread(target=self._send_info, daemon=True).start()
+        # La surveillance s'arme d'elle-même dès que la fenêtre a pris la main (voir watch).
         self.post(True)
-        print("verrouillé :", self.reason)
+        log("verrouillé :", self.reason)
 
     def unlock(self, by: str) -> None:
         if not self.locked:
@@ -581,7 +625,7 @@ class WebGuard:
         for w in (self.window, *self.covers):
             w.hide()
         self.post(False)
-        print("déverrouillé :", by)
+        log("déverrouillé :", by)
 
     def check_code(self, code: str) -> dict:
         if not self.locked:
@@ -610,27 +654,29 @@ class WebGuard:
             self.unlock("mot de passe Windows")
 
     def watch(self) -> None:
-        """Une fenêtre d'un autre programme passe devant (Ctrl+Alt+Suppr puis Gestionnaire des
-        tâches…) : verrou de Windows."""
-        import ctypes
-
-        user32 = ctypes.windll.user32
-        user32.GetForegroundWindow.restype = ctypes.c_void_p
-
-        def foreign() -> bool:
-            fg = user32.GetForegroundWindow()
-            if not fg:  # écran sécurisé (Ctrl+Alt+Suppr) ou session verrouillée : rien à voir
-                return False
-            pid = ctypes.c_ulong()
-            user32.GetWindowThreadProcessId(ctypes.c_void_p(fg), ctypes.byref(pid))
-            return pid.value != os.getpid()
-
+        """Garde la main sur l'écran. Tant que la fenêtre Opal n'a pas encore pris le premier
+        plan, on la remet devant (sans rien déclencher). Une fois armée, si la fenêtre d'un
+        autre programme passe devant (Ctrl+Alt+Suppr puis Gestionnaire des tâches…), on tente
+        de reprendre la main, puis on passe au verrou de Windows."""
         while True:
-            time.sleep(0.3)
-            if self.locked and self.armed and foreign():
-                time.sleep(0.5)  # simple clignement de focus (notification…) ?
-                if self.locked and self.armed and foreign():
-                    print("tentative de sortie : verrou de Windows")
+            time.sleep(0.4)
+            if not self.locked:
+                continue
+            ours = own_foreground()
+            if ours is None:  # écran sécurisé ou session verrouillée : rien à voir
+                continue
+            if not self.armed:
+                if ours:
+                    self.armed = True
+                    log("écran Opal au premier plan : surveillance active")
+                else:
+                    take_focus("Opal Gardien")
+                continue
+            if not ours:
+                take_focus("Opal Gardien")  # une notification a pu voler le focus
+                time.sleep(0.8)
+                if self.locked and self.armed and own_foreground() is False:
+                    log("tentative de sortie : verrou de Windows")
                     self.system_lock()
 
     def hook_loop(self) -> None:
@@ -678,7 +724,7 @@ def run_web(config: dict, html: str) -> None:
         threading.Thread(target=network_loop, args=(config, commands, link), daemon=True).start()
         threading.Thread(target=guard.hook_loop, daemon=True).start()
         threading.Thread(target=guard.watch, daemon=True).start()
-        print(f"Agent Opal Gardien prêt ({config['machine']}), écran sphère.")
+        log(f"Agent Opal Gardien prêt ({config['machine']}), écran sphère.")
         guard.run_commands(commands)
 
     webview.start(start, gui="edgechromium")
