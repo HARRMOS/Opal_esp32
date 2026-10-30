@@ -26,7 +26,7 @@ import hud
 from faces import FaceBook
 from gestures import GestureDetector
 from pose import PoseDetector
-from objects import ObjectDetector
+from objects import FRENCH, ObjectDetector
 from expression import ExpressionReader, looks_at_camera
 from logs import log
 
@@ -213,6 +213,7 @@ class CameraHub:
             log("objects_disabled", error=str(exc)[:120])
             self.objects = None
         self._objects_task: asyncio.Task[None] | None = None
+        self._device_objects_at = 0.0  # dernière liste envoyée par l'appareil qui filme
         self.on_expression: Callable[[str], Awaitable[None]] | None = None
         self.on_eye_contact: Callable[[], Awaitable[None]] | None = None
         self._expr_check = 0.0
@@ -537,11 +538,29 @@ class CameraHub:
         while self.ws is not None:
             await asyncio.sleep(1.0)
             jpeg = self.frame
-            if not self.present or jpeg is None:
-                continue
+            if not self.present or jpeg is None or time.time() - self._device_objects_at < 3:
+                continue  # l'appareil qui filme s'en charge (plus précis, en temps réel)
             items = await asyncio.to_thread(self._detect_objects, jpeg)
             if items is not None:
                 self.seen["objects"] = {"items": items, "at": time.time()}
+
+    def note_device_objects(self, ws: Any, items: Any) -> None:
+        """Objets détectés par l'appareil qui filme (page « envoyer ») : vérifiés puis gardés."""
+        if ws is not self.ws or not isinstance(items, list):
+            return
+        clean = []
+        for item in items[:30]:
+            try:
+                label = str(item["label"])[:30]
+                box = tuple(min(1.0, max(0.0, float(v))) for v in item["box"][:4])
+                score = round(float(item["score"]), 2)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if len(box) == 4:
+                clean.append({"label": label, "fr": FRENCH.get(label, label), "score": score,
+                              "box": box})
+        self._device_objects_at = time.time()
+        self.seen["objects"] = {"items": clean, "at": self._device_objects_at, "source": "appareil"}
 
     def _detect_objects(self, jpeg: bytes) -> list[dict] | None:
         img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)

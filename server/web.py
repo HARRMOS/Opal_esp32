@@ -12,6 +12,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import time
 from collections import defaultdict, deque
 from urllib.parse import urlsplit
@@ -22,6 +23,7 @@ from typing import Any
 from aiohttp import WSMsgType, web
 
 from camera import CameraHub
+from objects import FRENCH
 from logs import log
 
 PAGE = """<!doctype html>
@@ -89,7 +91,7 @@ SOURCE_PAGE = """<!doctype html>
        justify-content:center;gap:12px;background:#0b0d12;color:#cfd6e4;font:15px system-ui,sans-serif}
   #pv{position:relative;line-height:0}
   video{width:min(92vw,640px);border-radius:12px;background:#000;transform:scaleX(-1)}
-  #ov{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  #ov,#obj{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
   video.back{transform:none}
   .row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
   button,select{font:inherit;color:#cfd6e4;background:#1d2333;border:1px solid #4a5675;
@@ -98,7 +100,7 @@ SOURCE_PAGE = """<!doctype html>
   p{opacity:.65;margin:0;text-align:center;max-width:90vw}
 </style></head>
 <body>
-<div id="pv"><video id="v" playsinline muted autoplay></video><canvas id="ov"></canvas></div>
+<div id="pv"><video id="v" playsinline muted autoplay></video><canvas id="ov"></canvas><canvas id="obj"></canvas></div>
 <div class="row">
   <select id="facing"><option value="user">Caméra avant</option>
     <option value="environment">Caméra arrière</option></select>
@@ -190,6 +192,7 @@ async function start() {
   try { lock = await navigator.wakeLock?.request("screen"); } catch {}
   go.textContent = "Arrêter"; go.classList.add("stop"); facing.disabled = true;
   connect();
+  loadDetector();
 }
 
 function stop() {
@@ -199,10 +202,78 @@ function stop() {
   stream?.getTracks().forEach((t) => t.stop()); stream = null;
   lock?.release?.(); lock = null;
   go.textContent = "Démarrer"; go.classList.remove("stop"); facing.disabled = false;
+  objets = []; objctx.clearRect(0, 0, obj.width, obj.height);
   say("Arrêté : l'ESP32-CAM reprend la main.");
 }
 
 go.onclick = () => (running ? stop() : start());
+
+// Objets : détectés ici même par la puce graphique de l'appareil (MediaPipe, EfficientDet-Lite2),
+// sur l'image en pleine résolution et en temps réel. Le VPS ne reçoit que la liste.
+const MP = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+const MODEL = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite2/float16/1/efficientdet_lite2.tflite";
+const OBJETS = __OBJETS__;
+const obj = document.getElementById("obj"), objctx = obj.getContext("2d");
+let detector = null, loading = false, objStatus = "", lastDetect = 0, lastSent = 0, objets = [];
+
+async function loadDetector() {
+  if (detector || loading) return;
+  loading = true; objStatus = "chargement des objets…";
+  try {
+    const { FilesetResolver, ObjectDetector } = await import(MP + "/vision_bundle.mjs");
+    const vision = await FilesetResolver.forVisionTasks(MP + "/wasm");
+    const options = (delegate) => ({ baseOptions: { modelAssetPath: MODEL, delegate },
+      runningMode: "VIDEO", scoreThreshold: 0.4, maxResults: 15 });
+    try { detector = await ObjectDetector.createFromOptions(vision, options("GPU")); }
+    catch { detector = await ObjectDetector.createFromOptions(vision, options("CPU")); }
+    objStatus = "";
+  } catch (err) {
+    console.warn(err); objStatus = "objets indisponibles sur cet appareil";
+  }
+  loading = false;
+}
+
+function drawObjects() {
+  const r = devicePixelRatio || 1, w = Math.round(v.clientWidth * r), h = Math.round(v.clientHeight * r);
+  if (obj.width !== w || obj.height !== h) { obj.width = w; obj.height = h; }
+  objctx.clearRect(0, 0, w, h);
+  const size = Math.max(13, w / 30);
+  objctx.font = `600 ${size}px system-ui, sans-serif`;
+  objctx.lineWidth = Math.max(2, w / 260);
+  for (const o of objets) {
+    if (o.label === "person") continue;  // le visage a déjà son cadre
+    const [x, y, bw, bh] = o.box;
+    const xa = (mirrored() ? 1 - x : x) * w, xb = (mirrored() ? 1 - x - bw : x + bw) * w;
+    const left = Math.min(xa, xb), top = y * h;
+    objctx.strokeStyle = "#f2c94c"; objctx.strokeRect(left, top, Math.abs(xb - xa), bh * h);
+    const text = `${OBJETS[o.label] || o.label}  ${Math.round(o.score * 100)} %`;
+    const tw = objctx.measureText(text).width + size * 0.9, th = size * 1.5;
+    const tx = Math.min(Math.max(0, left), w - tw), ty = top - th - 4 < 0 ? top + 4 : top - th - 4;
+    objctx.fillStyle = "#f2c94c"; objctx.beginPath(); objctx.roundRect(tx, ty, tw, th, th / 2); objctx.fill();
+    objctx.fillStyle = "#0b0d12"; objctx.fillText(text, tx + size * 0.45, ty + th * 0.7);
+  }
+}
+
+function detectLoop(now) {
+  if (running && detector && v.readyState >= 2 && v.videoWidth && now - lastDetect > 100) {  // ~10/s
+    lastDetect = now;
+    try {
+      const res = detector.detectForVideo(v, now), W = v.videoWidth, H = v.videoHeight;
+      objets = res.detections.map((d) => {
+        const c = d.categories[0], b = d.boundingBox;
+        return { label: c.categoryName, score: Math.round(c.score * 100) / 100,
+                 box: [b.originX / W, b.originY / H, b.width / W, b.height / H] };
+      });
+    } catch (err) { console.warn(err); }
+    drawObjects();
+    if (ws && ws.readyState === 1 && now - lastSent > 500) {
+      lastSent = now;
+      ws.send(JSON.stringify({ type: "objects", items: objets }));
+    }
+  }
+  requestAnimationFrame(detectLoop);
+}
+requestAnimationFrame(detectLoop);
 // Vision d'Opal par-dessus l'aperçu : ce que le VPS détecte (visage, main, geste).
 const ov = document.getElementById("ov"), octx = ov.getContext("2d");
 const GESTES = { pouce_haut: "Pouce levé", pouce_bas: "Pouce baissé", main_ouverte: "Main ouverte",
@@ -275,18 +346,10 @@ function drawVision(s) {
     if (crossed) tag("Bras croisés", Math.min(p[4][0], p[5][0]), Math.min(p[4][1], p[5][1]), color);
   }
   // Objets : analysés une fois par seconde, donc gardés un peu plus longtemps à l'écran.
-  let people = 0;
-  if (s.objects && s.now - s.objects.at < 1.6) {
-    for (const o of s.objects.items || []) {
-      if (o.label === "person") { people++; continue; }
-      const [x, y, w, h] = o.box, xa = px(x), xb = px(x + w), left = Math.min(xa, xb);
-      octx.strokeStyle = "#f2c94c"; octx.lineWidth = Math.max(2, ov.width / 260);
-      octx.strokeRect(left, y * H, Math.abs(xb - xa), h * H);
-      tag(`${o.fr}  ${Math.round(o.score * 100)} %`, left, y * H, "#f2c94c");
-    }
-  }
+  const people = objets.filter((o) => o.label === "person").length;
   let state = !s.present ? "Personne" : s.who ? `${s.who} est là` : s.who === "" ? "Inconnu" : "Quelqu'un est là";
   if (people >= 2) state += `  ·  ${people} personnes`;
+  if (objStatus) state += `  ·  ${objStatus}`;
   const last = s.last_gesture;
   if (last && s.now - last.at < 5) state += `  ·  ${GESTES[last.name] || last.name} !`;
   if (running && Date.now() > spokeUntil) say(`Opal voit : ${state}`);
@@ -309,6 +372,9 @@ vision();
 
 MAX_FAILURES = 8
 LOCKOUT_S = 15 * 60
+
+
+SOURCE_PAGE = SOURCE_PAGE.replace("__OBJETS__", json.dumps(FRENCH, ensure_ascii=False))
 
 
 class BrowserSource:
@@ -429,6 +495,13 @@ def make_app(
             async for msg in ws:
                 if msg.type == WSMsgType.BINARY:
                     await cams.on_binary(msg.data, link)
+                elif msg.type == WSMsgType.TEXT:  # objets détectés par l'appareil
+                    try:
+                        data = json.loads(msg.data)
+                    except ValueError:
+                        continue
+                    if isinstance(data, dict) and data.get("type") == "objects":
+                        cams.note_device_objects(link, data.get("items"))
         except (TimeoutError, ValueError):
             pass
         finally:
