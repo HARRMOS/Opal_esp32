@@ -561,19 +561,41 @@ class WebGuard:
         self.blocker = KeyBlocker(lambda: self.locked)
         screens = list(webview.screens)
         primary = next((s for s in screens if s.x == 0 and s.y == 0), screens[0] if screens else None)
-        full = {} if WINDOWED else {"fullscreen": True, "on_top": True, "frameless": True}
+        # easy_drag=False : sans ça, une fenêtre sans bordure se déplace en cliquant-glissant
+        # n'importe où dessus… et on accède au bureau derrière.
+        full = {} if WINDOWED else {"fullscreen": True, "on_top": True, "frameless": True,
+                                    "easy_drag": False, "resizable": False, "shadow": False}
         self.window = webview.create_window(
             "Opal Gardien", html=html, js_api=PageApi(self), hidden=True, focus=True,
             background_color="#07040a", width=1280, height=720,
             **({"screen": primary} if primary and not WINDOWED else {}), **full)
         self.window.events.closing += self._on_closing
         # Les autres moniteurs reçoivent un voile sombre : aucun ne doit rester utilisable.
+        others = [s for s in screens if s is not primary]
         self.covers = [] if WINDOWED else [
             webview.create_window("Opal Gardien (écran)", html=COVER_HTML, screen=s, hidden=True,
                                   focus=False, background_color="#07040a", **full)
-            for s in screens if s is not primary]
+            for s in others]
         for cover in self.covers:
             cover.events.closing += self._on_closing
+        # Chaque fenêtre et l'écran qu'elle doit couvrir exactement (remise en place si besoin).
+        self.places = [] if WINDOWED else [(self.window, primary), *zip(self.covers, others)]
+
+    def keep_in_place(self) -> None:
+        """Une fenêtre de garde a bougé ou changé de taille : on la remet sur tout son écran."""
+        for window, screen in self.places:
+            if screen is None:
+                continue
+            try:
+                off = max(abs(window.x - screen.x), abs(window.y - screen.y),
+                          abs(window.width - screen.width), abs(window.height - screen.height))
+                if off > 8:
+                    log(f"fenêtre déplacée ({window.x},{window.y} {window.width}×{window.height})"
+                        " : remise en plein écran")
+                    window.move(screen.x, screen.y)
+                    window.resize(screen.width, screen.height)
+            except Exception as exc:  # noqa: BLE001
+                log("remise en place impossible :", exc)
 
     def _on_closing(self) -> bool:
         return not self.locked  # False : fermeture refusée tant que c'est verrouillé
@@ -662,6 +684,7 @@ class WebGuard:
             time.sleep(0.4)
             if not self.locked:
                 continue
+            self.keep_in_place()
             ours = own_foreground()
             if ours is None:  # écran sécurisé ou session verrouillée : rien à voir
                 continue
