@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Gabarit de LaunchAgent macOS pour l'agent de verrouillage Opal.
      Remplace __PYTHON__ par le chemin de python3 (which python3) et __SCRIPT__ par le
      chemin de opal_guard.py, puis place ce fichier dans ~/Library/LaunchAgents/ et charge-le
-     avec : launchctl load ~/Library/LaunchAgents/pro.inoma.opal-guard.plist
+     avec : launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/pro.inoma.opal-guard.plist
      (Le README donne une commande qui le génère automatiquement avec les bons chemins.) -->
 <plist version="1.0">
 <dict>

@@ -52,7 +52,9 @@ on ne peut pas demander à Opal « déverrouille mon PC » par la voix.
    ```
    sed -e "s#__PYTHON__#$(which python3)#" -e "s#__SCRIPT__#$HOME/.opal_guard/opal_guard.py#" \
      ~/.opal_guard/pro.inoma.opal-guard.plist > ~/Library/LaunchAgents/pro.inoma.opal-guard.plist
-   launchctl load ~/Library/LaunchAgents/pro.inoma.opal-guard.plist
+   plutil -lint ~/Library/LaunchAgents/pro.inoma.opal-guard.plist
+   launchctl bootout gui/$(id -u)/pro.inoma.opal-guard 2>/dev/null
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/pro.inoma.opal-guard.plist
    ```
 4. macOS demandera peut-être d'autoriser Python (Accessibilité / Surveillance de l'entrée) :
    accepte, sinon l'écran de garde ne peut pas garder la main.
@@ -60,7 +62,7 @@ on ne peut pas demander à Opal « déverrouille mon PC » par la voix.
 Sur macOS, aucun programme ne peut non plus bloquer toutes les touches système : l'agent
 s'appuie sur le **verrouillage natif macOS** (écran de connexion, mot de passe exigé) dès
 qu'on tente de quitter l'écran de garde. Pour l'arrêter :
-`launchctl unload ~/Library/LaunchAgents/pro.inoma.opal-guard.plist`.
+`launchctl bootout gui/$(id -u)/pro.inoma.opal-guard`. Journal : `/tmp/opal-guard.log`.
 
 ## Le jeton du gardien
 
