@@ -41,7 +41,8 @@ on ne peut pas demander à Opal « déverrouille mon PC » par la voix.
 1. Récupère l'agent (par exemple depuis le VPS) dans `~/.opal_guard/` :
    ```
    mkdir -p ~/.opal_guard
-   scp ubuntu@51.210.177.60:/home/ubuntu/Opal_esp32/agent/opal_guard.py ~/.opal_guard/opal_guard.py
+   scp ubuntu@51.210.177.60:/home/ubuntu/Opal_esp32/agent/opal_guard.py \
+       ubuntu@51.210.177.60:/home/ubuntu/Opal_esp32/agent/pro.inoma.opal-guard.plist ~/.opal_guard/
    ```
 2. Configure (ton code reste masqué, jamais transmis) :
    ```
@@ -53,7 +54,8 @@ on ne peut pas demander à Opal « déverrouille mon PC » par la voix.
      ~/.opal_guard/pro.inoma.opal-guard.plist > ~/Library/LaunchAgents/pro.inoma.opal-guard.plist
    launchctl load ~/Library/LaunchAgents/pro.inoma.opal-guard.plist
    ```
-   (copie d'abord `pro.inoma.opal-guard.plist` à côté du script, comme opal_guard.py.)
+4. macOS demandera peut-être d'autoriser Python (Accessibilité / Surveillance de l'entrée) :
+   accepte, sinon l'écran de garde ne peut pas garder la main.
 
 Sur macOS, aucun programme ne peut non plus bloquer toutes les touches système : l'agent
 s'appuie sur le **verrouillage natif macOS** (écran de connexion, mot de passe exigé) dès

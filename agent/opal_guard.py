@@ -45,6 +45,9 @@ from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".opal_guard"
 CONFIG_PATH = CONFIG_DIR / "config.json"
+# Présent tant que c'est verrouillé : si l'agent est tué puis relancé (tâche planifiée,
+# LaunchAgent), il revient directement verrouillé au lieu d'ouvrir l'accès.
+LOCK_FLAG = CONFIG_DIR / "locked"
 PBKDF2_ROUNDS = 200_000
 MAX_CODE_ATTEMPTS = 5  # au-delà : verrouillage natif + remise à zéro
 POLL_TIMEOUT_S = 30
@@ -108,11 +111,15 @@ def native_lock() -> None:
 
             ctypes.windll.user32.LockWorkStation()
         elif IS_MAC:
-            # Suspend la session → écran de connexion macOS (mot de passe exigé).
-            os.system(
-                "/System/Library/CoreServices/Menu\\ Extras/User.menu/Contents/Resources/"
-                "CGSession -suspend"
-            )
+            # Écran de verrouillage macOS (mot de passe exigé), comme Ctrl+Cmd+Q. L'ancien
+            # outil CGSession n'existe plus depuis Big Sur : on passe par login.framework.
+            import ctypes
+
+            login = "/System/Library/PrivateFrameworks/login.framework/Versions/Current/login"
+            if os.path.exists(login):
+                ctypes.CDLL(login).SACLockScreenImmediate()
+            else:
+                os.system("pmset displaysleepnow")  # veille écran : mot de passe au réveil
         else:
             os.system("loginctl lock-session || xdg-screensaver lock")
     except Exception as exc:  # noqa: BLE001
@@ -203,6 +210,8 @@ class LockScreen:
         self.root.title("Opal Gardien")
         self.root.configure(bg="#07060a")
         self.root.protocol("WM_DELETE_WINDOW", lambda: None)  # la croix ne ferme pas
+        if IS_MAC:  # Cmd+Q ne quitte pas l'écran de garde
+            self.root.createcommand("tk::mac::Quit", lambda: None)
 
         self._build()
         # Les chiffres tapés au clavier physique entrent le code ; Entrée valide, Retour arrière
@@ -269,7 +278,15 @@ class LockScreen:
         self.root.attributes("-fullscreen", True)
         self.root.attributes("-topmost", True)
         if IS_MAC:  # au-dessus même du Dock et des autres apps
-            self.root.call("::tk::unsupported::MacWindowStyle", "style", self.root._w, "plain", "none")
+            try:
+                self.root.call("::tk::unsupported::MacWindowStyle", "style", self.root._w,
+                               "plain", "none")
+            except tk.TclError:
+                pass
+        try:
+            LOCK_FLAG.write_text(reason or "verrouillé", encoding="utf-8")
+        except OSError:
+            pass
         self.root.lift()
         self.root.focus_force()
         try:
@@ -293,6 +310,7 @@ class LockScreen:
             pass
         self.root.attributes("-topmost", False)
         self.root.withdraw()
+        LOCK_FLAG.unlink(missing_ok=True)
         self._report(False)
         print(f"déverrouillé ({by})")
 
@@ -447,6 +465,23 @@ def main() -> None:
     screen = LockScreen(config, on_unlock=lambda: None,
                         report=lambda locked: locked_flag.get("post", lambda _l: None)(locked))
     threading.Thread(target=network_loop, args=(config, commands, locked_flag), daemon=True).start()
+
+    # Si quelqu'un arrête l'agent pendant le verrouillage, on engage le verrou du système.
+    import atexit
+    import signal
+
+    def on_exit(*_args) -> None:  # noqa: ANN002
+        if screen._locked:
+            native_lock()
+
+    atexit.register(on_exit)
+    for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+        if sig is not None:
+            signal.signal(sig, lambda *a: (on_exit(), sys.exit(0)))
+
+    # Relancé alors qu'il était verrouillé (agent tué, redémarrage) : on reverrouille aussitôt.
+    if LOCK_FLAG.exists():
+        commands.put({"cmd": "lock", "reason": "Verrouillage repris après un redémarrage de l'agent."})
     screen.pump(commands)
     print(f"Agent Opal Gardien prêt ({config['machine']}). En attente des ordres du pont.")
     screen.root.mainloop()

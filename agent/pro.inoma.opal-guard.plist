@@ -15,6 +15,8 @@
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
     <key>ProcessType</key><string>Interactive</string>
+    <!-- Seulement dans la session graphique : la fenêtre de garde doit pouvoir s'afficher. -->
+    <key>LimitLoadToSessionType</key><string>Aqua</string>
     <key>StandardErrorPath</key><string>/tmp/opal-guard.log</string>
     <key>StandardOutPath</key><string>/tmp/opal-guard.log</string>
 </dict>
