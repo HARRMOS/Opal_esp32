@@ -295,6 +295,7 @@ class OpalBridge:
         self._hearts_at = -HEARTS_EVERY_S
         self.guard = GuardHub()
         self._pc_locked = False
+        self._unlock_after_absence = False
         self._stranger_since = 0.0
         self._comforted_at = -COMFORT_COOLDOWN_S
 
@@ -376,13 +377,12 @@ class OpalBridge:
         if tool == "opal_box_ecran":
             return await self._screen_tool(args)
         if tool == "opal_box_verrouiller":
-            reason = str(args.get("raison") or "Verrouillage demandé")
-            n = self.guard.send("lock", reason)
+            n = await self.lock_pcs(str(args.get("raison") or "Verrouillage demandé"))
             if not n:
                 return False, "Aucun PC avec l'agent de verrouillage n'est en ligne."
-            self._pc_locked = True
-            await self.send_to_devices({"type": "eyes", "style": "gardien", "hold_ms": 0})
-            return True, f"{n} PC verrouillé(s). Déverrouillage quand tu reconnais le propriétaire ou par son code."
+            return True, (f"{n} PC verrouillé(s). Déverrouillage par son code, ou quand ta caméra "
+                          "le reconnaît à son retour (s'il est devant toi maintenant, il doit "
+                          "d'abord s'absenter).")
         if tool == "opal_box_oublier_visage":
             name = str(args.get("nom") or "").strip()
             if self.cams.faces is None or not self.cams.faces.forget(name):
@@ -685,13 +685,29 @@ class OpalBridge:
             return 0
         return await self.show_scene("meteo", ms, kind, **data)
 
+    async def lock_pcs(self, reason: str) -> int:
+        """Verrouille les PC ; retourne le nombre de machines qui ont reçu l'ordre.
+
+        Si le propriétaire est devant la caméra à ce moment (« verrouille mon PC » en
+        partant), son visage ne déverrouillera qu'après une vraie absence puis un retour :
+        sinon le verrouillage serait annulé dans la seconde."""
+        n = self.guard.send("lock", reason)
+        if n:
+            self._pc_locked = True
+            self._unlock_after_absence = bool(self.cams.present and self.cams.identity)
+            log("guard_lock", reason=reason, wait_absence=self._unlock_after_absence)
+            await self.send_to_devices({"type": "eyes", "style": "gardien", "hold_ms": 0})
+        return n
+
     async def _guard_pc(self, stranger: bool, owner_here: bool, now: float) -> None:
         """Inconnu seul assez longtemps → verrouille les PC ; ton retour → déverrouille."""
         if not GUARD_ENABLED:
             return
+        if self._unlock_after_absence and not self.cams.present:
+            self._unlock_after_absence = False  # parti : ton prochain retour déverrouillera
         if owner_here:
             self._stranger_since = 0.0
-            if self._pc_locked:
+            if self._pc_locked and not self._unlock_after_absence:
                 self._pc_locked = False
                 self.guard.send("unlock")
                 log("guard_unlock", reason="propriétaire reconnu")
@@ -700,10 +716,7 @@ class OpalBridge:
         if stranger and not self._pc_locked:
             self._stranger_since = self._stranger_since or now
             if now - self._stranger_since >= GUARD_LOCK_AFTER_S:
-                if self.guard.send("lock", "Inconnu devant Opal pendant ton absence"):
-                    self._pc_locked = True
-                    log("guard_lock", seconds=round(now - self._stranger_since))
-                    await self.send_to_devices({"type": "eyes", "style": "gardien", "hold_ms": 0})
+                await self.lock_pcs("Inconnu devant Opal pendant ton absence")
         elif not stranger:
             self._stranger_since = 0.0
 
