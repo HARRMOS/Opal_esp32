@@ -34,6 +34,7 @@ import platform
 import queue
 import secrets
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -450,15 +451,52 @@ def network_loop(config: dict, commands: queue.Queue, locked_flag) -> None:
             time.sleep(5)
 
 
+def tk_works() -> bool:
+    """L'écran de garde peut-il s'ouvrir ? Testé dans un processus à part, car sur certains
+    macOS la bibliothèque Tk arrête le programme net au lieu de lever une erreur."""
+    try:
+        probe = subprocess.run([sys.executable, "-c", "import tkinter; tkinter.Tk().destroy()"],
+                               capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if probe.returncode != 0:
+        print("Tk indisponible :", probe.stderr.decode(errors="replace").strip()[-200:],
+              file=sys.stderr)
+    return probe.returncode == 0
+
+
+def run_fallback(config: dict) -> None:
+    """Mode secours sans écran de garde : un ordre de verrouillage engage directement le
+    verrou du système (mot de passe exigé). Le déverrouillage se fait alors avec le mot de
+    passe de la session, pas par le visage ni le code Opal."""
+    print("Mode secours : verrou du système seulement (écran Opal indisponible).")
+    commands: queue.Queue = queue.Queue()
+    link: dict = {}
+    threading.Thread(target=network_loop, args=(config, commands, link), daemon=True).start()
+    if LOCK_FLAG.exists():
+        native_lock()
+    while True:
+        if commands.get()["cmd"] == "lock":
+            native_lock()
+            link.get("post", lambda _l: None)(True)
 
 
 def main() -> None:
+    if IS_MAC and os.environ.get("SYSTEM_VERSION_COMPAT") != "0":
+        # macOS 26 annonce « 16 » aux programmes compilés avec un ancien SDK, et Tk refuse
+        # alors de démarrer (« macOS 26 or later required, have instead 16 »). On se relance
+        # en demandant la vraie version du système.
+        os.environ["SYSTEM_VERSION_COMPAT"] = "0"
+        os.execv(sys.executable, [sys.executable, *sys.argv])
     if "--setup" in sys.argv:
         setup()
         return
     config = load_config()
     if not config:
         sys.exit("Pas encore configuré. Lance d'abord : python opal_guard.py --setup")
+    if not tk_works():
+        run_fallback(config)
+        return
 
     commands: queue.Queue = queue.Queue()
     locked_flag: dict = {}
