@@ -465,6 +465,225 @@ def tk_works() -> bool:
     return probe.returncode == 0
 
 
+# ── Écran de garde « sphère » : page web dans une fenêtre Edge plein écran (Windows) ──
+LOCK_PAGE = Path(__file__).resolve().parent.parent / "garde" / "lock.html"
+UNLOCK_ANIMATION_S = 2.3  # durée de l'animation « Bon retour » avant de fermer l'écran
+WINDOWED = False  # tests uniquement : fenêtre normale au lieu du plein écran par-dessus tout
+COVER_HTML = ("<!doctype html><html><body style='margin:0;height:100vh;display:grid;place-items:center;"
+              "background:#07040a;color:#75606a;font:13px Consolas,monospace;letter-spacing:.35em'>"
+              "VERROUILLÉ PAR OPAL</body></html>")
+
+
+def web_page() -> str | None:
+    """La page de garde/lock.html, enveloppée pour l'agent (qui se signale à la page)."""
+    try:
+        body = LOCK_PAGE.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return ('<!doctype html><html lang="fr"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            "<script>window.OPAL_AGENT = true;</script></head><body>" + body + "</body></html>")
+
+
+def session_locked() -> bool:
+    """La session Windows est-elle verrouillée (écran de connexion affiché) ?"""
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    user32.OpenInputDesktop.restype = ctypes.c_void_p
+    desk = user32.OpenInputDesktop(0, False, 0x0100)  # DESKTOP_SWITCHDESKTOP
+    if not desk:
+        return True
+    try:
+        return not user32.SwitchDesktop(ctypes.c_void_p(desk))
+    finally:
+        user32.CloseDesktop(ctypes.c_void_p(desk))
+
+
+class PageApi:
+    """Seule fonction offerte à la page : vérifier le code (rien d'autre n'est exposé)."""
+
+    def __init__(self, guard: "WebGuard") -> None:
+        self._guard = guard
+
+    def check_code(self, code: str) -> dict:
+        return self._guard.check_code(code)
+
+
+class WebGuard:
+    """Écran de garde dans une fenêtre web plein écran, par-dessus tout, sur chaque moniteur."""
+
+    def __init__(self, config: dict, html: str) -> None:
+        import webview
+
+        self.config, self.html = config, html
+        self.salt = bytes.fromhex(config["salt"])
+        self.locked = self.armed = False
+        self.attempts = 0
+        self.reason, self.since = "", 0.0
+        self.post = lambda _locked: None
+        self.blocker = KeyBlocker(lambda: self.locked)
+        screens = list(webview.screens)
+        primary = next((s for s in screens if s.x == 0 and s.y == 0), screens[0] if screens else None)
+        full = {} if WINDOWED else {"fullscreen": True, "on_top": True, "frameless": True}
+        self.window = webview.create_window(
+            "Opal Gardien", html=html, js_api=PageApi(self), hidden=True, focus=True,
+            background_color="#07040a", width=1280, height=720,
+            **({"screen": primary} if primary and not WINDOWED else {}), **full)
+        self.window.events.loaded += self._on_loaded
+        self.window.events.closing += self._on_closing
+        # Les autres moniteurs reçoivent un voile sombre : aucun ne doit rester utilisable.
+        self.covers = [] if WINDOWED else [
+            webview.create_window("Opal Gardien (écran)", html=COVER_HTML, screen=s, hidden=True,
+                                  focus=False, background_color="#07040a", **full)
+            for s in screens if s is not primary]
+        for cover in self.covers:
+            cover.events.closing += self._on_closing
+
+    def _on_closing(self) -> bool:
+        return not self.locked  # False : fermeture refusée tant que c'est verrouillé
+
+    def _on_loaded(self) -> None:
+        if not self.locked:
+            return
+        info = {"online": True, "machines": "PC · opal-box", "reason": self.reason,
+                "since": int(self.since * 1000), "codeLength": int(self.config.get("code_len", 0))}
+        self.window.evaluate_js(f"window.opal && window.opal.update({json.dumps(info)})")
+
+    def lock(self, reason: str = "") -> None:
+        if self.locked:
+            return
+        self.locked, self.armed, self.attempts = True, False, 0
+        self.reason, self.since = reason or "Verrouillé par Opal", time.time()
+        try:
+            LOCK_FLAG.write_text(self.reason, encoding="utf-8")
+        except OSError:
+            pass
+        self.window.load_html(self.html)  # écran remis à neuf (déclenche « loaded »)
+        for w in (self.window, *self.covers):
+            w.show()
+        # Une seconde et demie pour prendre la main avant de surveiller les fuites.
+        threading.Timer(1.5, lambda: setattr(self, "armed", self.locked)).start()
+        self.post(True)
+        print("verrouillé :", self.reason)
+
+    def unlock(self, by: str) -> None:
+        if not self.locked:
+            return
+        if by != "code":  # la page n'a pas encore joué son animation de retour
+            try:
+                self.window.evaluate_js("window.opal && window.opal.unlocked()")
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(UNLOCK_ANIMATION_S)
+        self.locked = self.armed = False
+        LOCK_FLAG.unlink(missing_ok=True)
+        for w in (self.window, *self.covers):
+            w.hide()
+        self.post(False)
+        print("déverrouillé :", by)
+
+    def check_code(self, code: str) -> dict:
+        if not self.locked:
+            return {"ok": False}
+        if hmac.compare_digest(hash_code(str(code)[:16], self.salt), self.config["code_hash"]):
+            self.attempts = 0
+            threading.Timer(UNLOCK_ANIMATION_S, self.unlock, args=("code",)).start()
+            return {"ok": True}
+        self.attempts += 1
+        if self.attempts >= MAX_CODE_ATTEMPTS:
+            self.attempts = 0
+            threading.Thread(target=self.system_lock, daemon=True).start()
+            return {"ok": False, "message": "Trop d'essais : verrouillage de Windows"}
+        return {"ok": False, "remaining": MAX_CODE_ATTEMPTS - self.attempts}
+
+    def system_lock(self) -> None:
+        """Verrou de Windows. Si la session est rouverte avec le mot de passe Windows (preuve
+        que c'est le propriétaire), l'écran Opal se lève aussi."""
+        self.armed = False
+        time.sleep(0.6)  # laisse la page afficher son message
+        native_lock()
+        time.sleep(2)
+        while self.locked and session_locked():
+            time.sleep(0.5)
+        if self.locked:
+            self.unlock("mot de passe Windows")
+
+    def watch(self) -> None:
+        """Une fenêtre d'un autre programme passe devant (Ctrl+Alt+Suppr puis Gestionnaire des
+        tâches…) : verrou de Windows."""
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
+
+        def foreign() -> bool:
+            fg = user32.GetForegroundWindow()
+            if not fg:  # écran sécurisé (Ctrl+Alt+Suppr) ou session verrouillée : rien à voir
+                return False
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(ctypes.c_void_p(fg), ctypes.byref(pid))
+            return pid.value != os.getpid()
+
+        while True:
+            time.sleep(0.3)
+            if self.locked and self.armed and foreign():
+                time.sleep(0.5)  # simple clignement de focus (notification…) ?
+                if self.locked and self.armed and foreign():
+                    print("tentative de sortie : verrou de Windows")
+                    self.system_lock()
+
+    def hook_loop(self) -> None:
+        """Le blocage des touches système a besoin d'un fil avec sa propre boucle de messages."""
+        import ctypes
+        from ctypes import wintypes
+
+        self.blocker.install()
+        msg = wintypes.MSG()
+        user32 = ctypes.windll.user32
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+    def run_commands(self, commands: queue.Queue) -> None:
+        if LOCK_FLAG.exists():
+            self.lock("Verrouillage repris après un redémarrage de l'agent")
+        while True:
+            cmd = commands.get()
+            if cmd["cmd"] == "lock":
+                self.lock(str(cmd.get("reason", "")))
+            elif cmd["cmd"] == "unlock":
+                self.unlock("Opal t'a reconnu")
+
+
+def run_web(config: dict, html: str) -> None:
+    import atexit
+    import signal
+
+    import webview
+
+    guard = WebGuard(config, html)
+    commands: queue.Queue = queue.Queue()
+    link: dict = {}
+    guard.post = lambda locked: link.get("post", lambda _l: None)(locked)
+
+    def on_exit(*_args) -> None:  # noqa: ANN002
+        if guard.locked:
+            native_lock()
+
+    atexit.register(on_exit)
+    signal.signal(signal.SIGTERM, lambda *a: (on_exit(), os._exit(0)))
+
+    def start() -> None:
+        threading.Thread(target=network_loop, args=(config, commands, link), daemon=True).start()
+        threading.Thread(target=guard.hook_loop, daemon=True).start()
+        threading.Thread(target=guard.watch, daemon=True).start()
+        print(f"Agent Opal Gardien prêt ({config['machine']}), écran sphère.")
+        guard.run_commands(commands)
+
+    webview.start(start, gui="edgechromium")
+
+
 def run_fallback(config: dict) -> None:
     """Mode secours sans écran de garde : un ordre de verrouillage engage directement le
     verrou du système (mot de passe exigé). Le déverrouillage se fait alors avec le mot de
@@ -483,10 +702,16 @@ def run_fallback(config: dict) -> None:
 
 def main() -> None:
     # Journal ligne par ligne (sinon, redirigé vers un fichier par launchd, il n'apparaît
-    # qu'au bout de plusieurs Ko). Sous pythonw (Windows), il n'y a pas de sortie du tout.
+    # qu'au bout de plusieurs Ko). Sous pythonw (tâche planifiée Windows), il n'y a pas de
+    # console : le journal va dans ~/.opal_guard/agent.log.
+    if sys.stdout is None or sys.stderr is None:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        log_file = open(CONFIG_DIR / "agent.log", "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stdout or log_file
+        sys.stderr = sys.stderr or log_file
+        print(f"--- démarrage {time.strftime('%Y-%m-%d %H:%M:%S')} ({sys.executable})")
     for stream in (sys.stdout, sys.stderr):
-        if stream is not None:
-            stream.reconfigure(line_buffering=True)
+        stream.reconfigure(line_buffering=True)
     if IS_MAC and os.environ.get("SYSTEM_VERSION_COMPAT") != "0":
         # macOS 26 annonce « 16 » aux programmes compilés avec un ancien SDK, et Tk refuse
         # alors de démarrer (« macOS 26 or later required, have instead 16 »). On se relance
@@ -499,6 +724,17 @@ def main() -> None:
     config = load_config()
     if not config:
         sys.exit("Pas encore configuré. Lance d'abord : python opal_guard.py --setup")
+    # Sous Windows : le nouvel écran (fenêtre Edge) si pywebview et la page sont là ;
+    # sinon l'ancien écran Tk, puis le mode secours.
+    html = web_page() if IS_WINDOWS else None
+    if html:
+        try:
+            import webview  # noqa: F401
+        except Exception as exc:  # noqa: BLE001
+            print(f"pywebview indisponible ({exc!r}) : écran Tk", file=sys.stderr)
+        else:
+            run_web(config, html)
+            return
     if not tk_works():
         run_fallback(config)
         return

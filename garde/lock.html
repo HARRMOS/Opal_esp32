@@ -1,147 +1,522 @@
-<!doctype html>
-<html lang="fr">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Opal Gardien</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@500&display=swap">
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
-/* Aperçu de l'écran de verrouillage d'Opal : objectif rouge à gauche, clavier de code à droite. */
+/* Écran de verrouillage d'Opal : la sphère du gardien au centre, le cadenas en dessous,
+   statut en haut, raison du verrouillage et date en bas. Un seul thème, sombre, voulu. */
 :root {
-  --bg: #07060a;
-  --glow: #e8231c;
-  --fg: #efe9e4;
-  --muted: #9b8f8c;
-  --line: #2a1d1f;
-  --key: #151114;
-  --key-hover: #22181b;
-  --ok: #4fd18b;
-  --display: "Chakra Petch", "Segoe UI", system-ui, sans-serif;
-  --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --bg: #07040a;
+  --ink: #f4eaee;
+  --muted: #b39ba5;
+  --dim: #75606a;
+  --rose: #ff6b8f;
+  --peach: #ffc9b5;
+  --line: rgba(255, 196, 214, 0.16);
+  --glass: rgba(255, 236, 242, 0.045);
+  --ok: #5fe3a6;
+  --alert: #ff4d5e;
+  --display: "Sora", "Segoe UI", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
-body {
-  font-family: var(--body); color: var(--fg); overflow: hidden; user-select: none;
-  background: radial-gradient(ellipse at 28% 45%, #250608 0%, transparent 55%), var(--bg);
-  display: grid; place-items: center; min-height: 100vh;
-}
-.frame { font-size: 11px; color: var(--muted); position: fixed; top: 10px; left: 0; right: 0;
-  text-align: center; letter-spacing: .14em; text-transform: uppercase; font-family: var(--mono); }
-.screen {
-  width: min(96vw, 940px); aspect-ratio: 16 / 9; max-height: 92vh;
-  display: grid; grid-template-columns: 1.05fr 1fr;
-  border: 1px solid var(--line); border-radius: 18px; overflow: hidden;
-  box-shadow: 0 30px 80px #000a, 0 0 0 1px #0008;
-}
-@media (max-width: 680px) { .screen { grid-template-columns: 1fr; aspect-ratio: auto; height: 92vh; } .left { min-height: 220px; } }
+body { background: var(--bg); color: var(--ink); font-family: var(--display); overflow: hidden; user-select: none; }
+#sky { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
 
-/* ── Gauche : l'œil-objectif du gardien ── */
-.left { position: relative; display: grid; place-items: center;
-  background: radial-gradient(circle at 50% 42%, #1a0304, #0a0405 70%); padding: 24px; }
-.eye { width: min(46%, 220px); aspect-ratio: 1; border-radius: 50%; position: relative;
-  background:
-    radial-gradient(circle at 50% 50%, #fff6d8 0%, #ffbe2e 11%, #e82420 34%, #7c0f0c 62%, #1c0304 85%),
-    #000;
-  box-shadow: 0 0 60px #e8231c66, inset 0 0 30px #000a, inset 0 0 0 6px #5a5f66;
-  animation: pulse 2.4s ease-in-out infinite;
-}
-.eye::after { content: ""; position: absolute; inset: 0; border-radius: 50%;
-  background: repeating-conic-gradient(from 0deg, #0000 0 14deg, #00000055 14deg 15deg); }
-.eye .core { position: absolute; inset: 42%; border-radius: 50%; background: #fff4cf;
-  box-shadow: 0 0 22px #ffe08a; }
-@keyframes pulse { 0%, 100% { box-shadow: 0 0 44px #e8231c55, inset 0 0 30px #000a, inset 0 0 0 6px #5a5f66; }
-  50% { box-shadow: 0 0 80px #e8231caa, inset 0 0 30px #000a, inset 0 0 0 6px #5a5f66; } }
-.scan { position: absolute; inset: 0; pointer-events: none;
-  background: linear-gradient(#0000 0 48%, #e8231c18 49% 51%, #0000 52% 100%); background-size: 100% 7px;
-  animation: scan 5s linear infinite; opacity: .5; }
-@keyframes scan { to { background-position: 0 100%; } }
-.badge { position: absolute; top: 18px; left: 18px; font-family: var(--mono); font-size: 11px;
-  letter-spacing: .2em; color: var(--glow); border: 1px solid #e8231c55; padding: 4px 9px; border-radius: 6px;
-  display: flex; gap: 7px; align-items: center; }
-.badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--glow); animation: pulse 1.3s infinite; }
+/* ── Bandeau du haut ── */
+.top { position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center;
+  padding-top: max(28px, env(safe-area-inset-top, 0px)); padding-bottom: 0;
+  padding-left: max(clamp(16px, 3vw, 48px), env(safe-area-inset-left, 0px));
+  padding-right: max(clamp(16px, 3vw, 48px), env(safe-area-inset-right, 0px)); gap: 16px; }
+.brand { display: flex; align-items: center; gap: 18px; }
+.brand .beacon { width: 11px; height: 11px; border-radius: 50%; background: var(--alert); box-shadow: 0 0 14px var(--alert);
+  animation: beacon 2.4s ease-in-out infinite; }
+@keyframes beacon { 50% { opacity: .45; box-shadow: 0 0 4px var(--alert); } }
+.brand .word { font-weight: 400; font-size: 17px; letter-spacing: .62em; margin-right: -.62em; }
+.brand .sep { width: 1px; height: 18px; background: var(--line); }
+.brand .role { font-family: var(--mono); font-size: 12px; letter-spacing: .32em; color: var(--muted); }
 
-/* ── Droite : message + clavier de code ── */
-.right { background: #0b090d; padding: clamp(18px, 3.4vw, 34px); display: flex; flex-direction: column; gap: 14px;
-  padding-left: max(clamp(18px,3.4vw,34px), env(safe-area-inset-left)); padding-right: max(clamp(18px,3.4vw,34px), env(safe-area-inset-right)); }
-h1 { font-family: var(--display); font-weight: 600; font-size: clamp(20px, 3.3vw, 30px); margin: 0; letter-spacing: .01em; }
-.lede { color: var(--muted); margin: 0; font-size: clamp(13px, 1.7vw, 15px); line-height: 1.5; }
-.lede b { color: var(--fg); font-weight: 500; }
-.dots { display: flex; gap: 12px; margin: 6px 0 2px; }
-.dots i { width: 15px; height: 15px; border-radius: 50%; border: 1.5px solid #4a3a3c; transition: .12s; }
-.dots i.on { background: var(--glow); border-color: var(--glow); box-shadow: 0 0 12px #e8231c88; }
-.dots.bad i { border-color: var(--glow); animation: shake .4s; }
-.dots.good i { background: var(--ok); border-color: var(--ok); box-shadow: 0 0 12px #4fd18b88; }
-@keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
-.pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin-top: auto; max-width: 320px; }
-.pad button { font-family: var(--display); font-size: clamp(18px, 2.6vw, 24px); color: var(--fg);
-  background: var(--key); border: 1px solid var(--line); border-radius: 12px; padding: clamp(10px, 1.8vw, 16px) 0;
-  cursor: pointer; transition: .1s; }
-.pad button:hover { background: var(--key-hover); }
-.pad button:active { transform: scale(.95); }
-.pad button.wide { grid-column: span 1; font-size: 13px; letter-spacing: .08em; color: var(--muted); }
-.status { font-size: 13px; color: var(--muted); min-height: 1.4em; font-family: var(--mono); }
-.status.bad { color: var(--glow); }
-.status.good { color: var(--ok); }
-.hint { font-size: 11.5px; color: #6e6360; line-height: 1.5; margin: 0; }
-.hint b { color: var(--muted); font-weight: 500; }
+.status { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--glass); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+.status > span { padding: 9px 16px; display: flex; align-items: center; gap: 9px; white-space: nowrap; }
+.status > span + span { border-left: 1px solid var(--line); }
+.status .online { color: var(--ink); }
+.status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+.status .dot.off { background: var(--dim); box-shadow: none; }
+#clock { color: var(--ink); font-variant-numeric: tabular-nums; }
+.scan { position: relative; width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--line); display: grid; place-items: center; }
+.scan::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--peach); box-shadow: 0 0 10px var(--rose); }
+.scan::after { content: ""; position: absolute; inset: -1px; border-radius: 50%; border: 1px solid transparent;
+  border-top-color: var(--rose); animation: spin 2.2s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.status .facescan { padding-right: 10px; }
+
+/* ── Cadenas ── */
+.gate { position: fixed; left: 50%; bottom: max(78px, calc(env(safe-area-inset-bottom, 0px) + 66px)); transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 22px; transition: opacity .5s, transform .6s cubic-bezier(.2,.8,.2,1); }
+.lock { position: relative; width: 112px; height: 112px; border-radius: 50%; border: 0; cursor: pointer; color: var(--peach);
+  background: radial-gradient(circle at 50% 35%, #3a1420, #160810 70%); display: grid; place-items: center;
+  box-shadow: 0 0 0 1px rgba(255, 170, 190, .35), 0 0 40px rgba(255, 90, 130, .35), inset 0 0 24px rgba(255, 120, 150, .25); }
+.lock::before, .lock::after { content: ""; position: absolute; border-radius: 50%; pointer-events: none; }
+.lock::before { inset: -18px; border: 1px solid rgba(255, 170, 190, .22); animation: halo 3.2s ease-out infinite; }
+.lock::after { inset: -18px; border: 1px solid rgba(255, 170, 190, .12); }
+@keyframes halo { 0% { transform: scale(.9); opacity: .9; } 100% { transform: scale(1.25); opacity: 0; } }
+.lock svg { width: 34px; height: 34px; }
+.lock:hover { box-shadow: 0 0 0 1px rgba(255, 190, 205, .6), 0 0 60px rgba(255, 90, 130, .5), inset 0 0 24px rgba(255, 120, 150, .35); }
+.lock:focus-visible { outline: 2px solid var(--peach); outline-offset: 6px; }
+.gate .label { font-family: var(--mono); font-size: 12.5px; letter-spacing: .34em; color: var(--muted); text-align: center; }
+.gate .hint { font-family: var(--mono); font-size: 11px; letter-spacing: .12em; color: var(--dim); margin-top: -12px; text-align: center; }
+
+/* ── Pavé numérique ── */
+.pad { position: fixed; left: 50%; bottom: max(40px, calc(env(safe-area-inset-bottom, 0px) + 28px));
+  width: min(360px, calc(100vw - 32px)); transform: translate(-50%, 40px); opacity: 0; pointer-events: none;
+  border: 1px solid var(--line); border-radius: 28px; padding: 26px 24px 22px;
+  background: linear-gradient(180deg, rgba(40, 14, 24, .62), rgba(14, 6, 10, .72));
+  backdrop-filter: blur(18px) saturate(1.2); -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, .55), 0 0 60px rgba(255, 90, 130, .12);
+  transition: opacity .45s, transform .6s cubic-bezier(.2,.8,.2,1); }
+body.open .pad { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+body.open .gate { opacity: 0; transform: translate(-50%, 30px); pointer-events: none; }
+.pad h2 { margin: 0 0 4px; font-weight: 400; font-size: 15px; letter-spacing: .02em; text-align: center; }
+.pad .msg { font-family: var(--mono); font-size: 11.5px; letter-spacing: .08em; color: var(--muted); text-align: center; min-height: 1.5em; }
+.pad .msg.bad { color: var(--alert); }
+.pad .msg.good { color: var(--ok); }
+.dots { display: flex; justify-content: center; gap: 14px; margin: 18px 0 22px; }
+.dots i { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(255, 190, 205, .45); transition: .15s; }
+.dots i.on { background: var(--peach); border-color: var(--peach); box-shadow: 0 0 12px var(--rose); }
+.dots.bad { animation: shake .45s; }
+.dots.bad i { border-color: var(--alert); }
+.dots.good i { background: var(--ok); border-color: var(--ok); box-shadow: 0 0 12px var(--ok); }
+@keyframes shake { 20%, 60% { transform: translateX(-9px); } 40%, 80% { transform: translateX(9px); } }
+.keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.keys button { font: 300 24px var(--display); color: var(--ink); height: 62px; border-radius: 20px; cursor: pointer;
+  border: 1px solid var(--line); background: rgba(255, 236, 242, .04); transition: background .15s, transform .08s, border-color .15s; }
+.keys button:hover { background: rgba(255, 200, 215, .1); border-color: rgba(255, 196, 214, .32); }
+.keys button:active { transform: scale(.95); }
+.keys button:focus-visible { outline: 2px solid var(--peach); outline-offset: 2px; }
+.keys .fn { font: 500 12px var(--mono); letter-spacing: .16em; color: var(--muted); }
+.keys .ok { color: #0d0507; background: linear-gradient(180deg, var(--peach), #ff9fb6); border-color: transparent; font-weight: 500; }
+.keys .ok:hover { background: linear-gradient(180deg, #ffe0d4, #ffb3c6); }
+.pad .back { display: block; margin: 16px auto 0; background: none; border: 0; color: var(--dim); cursor: pointer;
+  font: 11px var(--mono); letter-spacing: .2em; }
+.pad .back:hover { color: var(--muted); }
+
+/* ── Bas de l'écran ── */
+.foot { position: fixed; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-between; align-items: center; gap: 16px;
+  padding-bottom: max(30px, env(safe-area-inset-bottom, 0px)); padding-top: 0;
+  padding-left: max(clamp(16px, 3vw, 48px), env(safe-area-inset-left, 0px));
+  padding-right: max(clamp(16px, 3vw, 48px), env(safe-area-inset-right, 0px)); pointer-events: none; }
+.reason { display: flex; align-items: center; gap: 12px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--glass); padding: 5px 18px 5px 5px; max-width: min(520px, 60vw); }
+.reason .mark { width: 30px; height: 30px; flex: none; border-radius: 50%; border: 1px solid var(--line);
+  display: grid; place-items: center; font: 500 13px var(--display); }
+.reason .text { font-family: var(--mono); font-size: 12px; color: var(--muted); line-height: 1.35; min-width: 0; }
+.reason .text b { color: var(--ink); font-weight: 500; }
+.date { display: flex; align-items: center; gap: 14px; font-family: var(--mono); font-size: 12px; letter-spacing: .26em; color: var(--muted); white-space: nowrap; }
+.date::before { content: ""; width: 28px; height: 1px; background: var(--dim); }
+
+/* ── Succès ── */
+.welcome { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; opacity: 0; transition: opacity .6s; }
+.welcome p { font-weight: 300; font-size: clamp(22px, 3vw, 34px); letter-spacing: .04em; margin: 0; }
+body.done .welcome { opacity: 1; }
+body.done .gate, body.done .pad, body.done .top, body.done .foot { opacity: 0; transition: opacity .5s; }
+.veil { position: fixed; inset: 0; background: #000; opacity: 0; pointer-events: none; transition: opacity .8s .9s; }
+body.done .veil { opacity: 1; }
+
+.demo { position: fixed; top: 84px; left: 50%; transform: translateX(-50%); font: 11px var(--mono); letter-spacing: .14em;
+  color: var(--dim); border: 1px dashed var(--line); border-radius: 999px; padding: 5px 12px; white-space: nowrap; }
+
+@media (max-width: 760px) {
+  .status .machines, .status .facescan-label { display: none; }
+  .brand .role, .brand .sep { display: none; }
+  .foot { flex-direction: column-reverse; align-items: flex-start; gap: 10px; }
+  .reason { max-width: 100%; }
+  .gate { bottom: 150px; }
+  .demo { top: 76px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brand .beacon, .scan::after, .lock::before { animation: none; }
+}
 </style>
-</head>
-<body>
-<div class="frame">Aperçu — écran de verrouillage affiché sur le PC</div>
-<div class="screen">
-  <div class="left">
-    <div class="badge"><span class="dot"></span> OPAL · GARDIEN</div>
-    <div class="eye"><div class="core"></div></div>
-    <div class="scan"></div>
+
+<canvas id="sky" aria-hidden="true"></canvas>
+
+<header class="top">
+  <div class="brand"><span class="beacon"></span><span class="word">OPAL</span><span class="sep"></span><span class="role">GARDIEN</span></div>
+  <div class="status" role="status">
+    <span class="online"><i class="dot" id="netdot"></i><span id="net">En ligne</span></span>
+    <span class="machines" id="machines">PC · opal-box</span>
+    <span id="clock">--:--</span>
+    <span class="facescan" title="Opal te cherche avec sa caméra"><span class="facescan-label">Visage</span><i class="scan"></i></span>
   </div>
-  <div class="right">
-    <h1>PC verrouillé par Opal</h1>
-    <p class="lede">Un visage inconnu est resté devant la caméra d'Opal.
-      Déverrouillage quand <b>Opal te reconnaît</b>, ou avec ton <b>code secret</b>.</p>
-    <div class="dots" id="dots"><i></i><i></i><i></i><i></i></div>
-    <div class="status" id="status">Entre ton code</div>
-    <div class="pad" id="pad"></div>
-    <p class="hint"><b>Essaie dans l'aperçu : le code de démo est 2468.</b> Sur ton PC, tu choisiras le tien,
-      je ne le connais pas. Toute tentative de sortie force le verrouillage Windows (mot de passe exigé).</p>
-  </div>
+</header>
+
+<div class="demo" id="demo" hidden>Aperçu · code de démonstration 2468</div>
+
+<div class="gate">
+  <button class="lock" id="open" type="button" aria-label="Ouvrir le pavé numérique">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 7.6-1.8"/><circle cx="12" cy="15.5" r="1.2" fill="currentColor"/><path d="M12 16.7v1.6"/>
+    </svg>
+  </button>
+  <div class="label">OUVRIR LE PAVÉ NUMÉRIQUE</div>
+  <div class="hint">ou regarde la caméra d'Opal</div>
 </div>
+
+<section class="pad" id="pad" aria-label="Pavé numérique">
+  <h2>Ton code secret</h2>
+  <div class="msg" id="msg">Tape-le, puis OK</div>
+  <div class="dots" id="dots"></div>
+  <div class="keys" id="keys"></div>
+  <button class="back" id="close" type="button">FERMER · ÉCHAP</button>
+</section>
+
+<footer class="foot">
+  <div class="reason"><span class="mark">O</span><span class="text" id="reason">Opal veille sur ce qui compte</span></div>
+  <div class="date" id="date"></div>
+</footer>
+
+<div class="welcome"><p id="welcome">Bon retour</p></div>
+<div class="veil"></div>
+
 <script>
-// Aperçu seulement : la vraie vérification du code se fait sur le PC, pas ici.
-const DEMO = "2468";
-let entry = "";
-const dots = document.getElementById("dots");
-const status = document.getElementById("status");
-const pad = document.getElementById("pad");
-function render() {
-  [...dots.children].forEach((d, i) => d.classList.toggle("on", i < entry.length));
+"use strict";
+// ─────────────────────────────────────────────────────────────────────────────
+// Liaison avec l'agent Opal Gardien (fenêtre plein écran sur le PC). Sans agent, c'est un
+// aperçu : le code de démonstration 2468 déverrouille.
+//   l'agent appelle  window.opal.update({ online, machines, reason, since, codeLength, name })
+//                    window.opal.unlocked(name)     (Opal t'a reconnu)
+//   la page appelle  pywebview.api.check_code(code) → { ok, remaining, message }
+// ─────────────────────────────────────────────────────────────────────────────
+// window.OPAL_AGENT est posé par l'agent avant la page ; l'API pywebview arrive un peu après.
+const agent = () => !!window.OPAL_AGENT || !!(window.pywebview && window.pywebview.api);
+async function api() {
+  if (!(window.pywebview && window.pywebview.api && window.pywebview.api.check_code))
+    await new Promise((ready) => addEventListener("pywebviewready", ready, { once: true }));
+  return window.pywebview.api;
 }
-function reset(cls, msg) {
-  dots.className = "dots " + cls; status.className = "status " + cls; status.textContent = msg;
-  setTimeout(() => { entry = ""; dots.className = "dots"; status.className = "status"; status.textContent = "Entre ton code"; render(); }, 1100);
+const $ = (id) => document.getElementById(id);
+const state = { codeLength: 0, entry: "", busy: false, mood: 0, moodColor: [255, 77, 94], done: 0, open: 0 };
+
+// ── Horloge et date ──
+function tick() {
+  const d = new Date();
+  $("clock").textContent = d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+  // « jeu. 30 oct. 2026 » → « JEU. 30 OCT. 2026 »
+  $("date").textContent = d.toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short", year: "numeric" }).toUpperCase();
+}
+tick(); setInterval(tick, 1000);
+
+// ── Pavé ──
+function renderDots() {
+  const n = Math.max(state.codeLength || 0, state.entry.length, 4);
+  const dots = $("dots");
+  if (dots.children.length !== n) dots.innerHTML = "<i></i>".repeat(n);
+  [...dots.children].forEach((d, i) => d.classList.toggle("on", i < state.entry.length));
+}
+function message(text, cls = "") { const m = $("msg"); m.textContent = text; m.className = "msg " + cls; }
+function openPad(on) {
+  document.body.classList.toggle("open", on);
+  if (on) { renderDots(); setTimeout(() => $("keys").querySelector("button")?.focus(), 250); }
+  else { state.entry = ""; renderDots(); message("Tape-le, puis OK"); $("open").focus(); }
+}
+for (const k of ["1", "2", "3", "4", "5", "6", "7", "8", "9", "⌫", "0", "OK"]) {
+  const b = document.createElement("button");
+  b.type = "button"; b.textContent = k;
+  if (k === "⌫") { b.className = "fn"; b.setAttribute("aria-label", "Effacer"); }
+  if (k === "OK") b.className = "ok";
+  b.onclick = () => press(k);
+  $("keys").append(b);
 }
 function press(k) {
-  if (k === "C") { entry = ""; render(); return; }
-  if (entry.length >= 4) return;
-  entry += k; render();
-  if (entry.length === 4) {
-    if (entry === DEMO) reset("good", "Opal te laisse entrer");
-    else reset("bad", "Code incorrect");
+  if (state.busy || state.done) return;
+  if (!document.body.classList.contains("open")) openPad(true);
+  if (k === "⌫") state.entry = state.entry.slice(0, -1);
+  else if (k === "OK") { if (state.entry) submit(); return; }
+  else if (/^\d$/.test(k) && state.entry.length < 12) state.entry += k;
+  renderDots();
+  if (state.codeLength && state.entry.length === state.codeLength) submit();
+}
+async function submit() {
+  state.busy = true;
+  let res;
+  if (agent()) res = await (await api()).check_code(state.entry);
+  else res = state.entry === "2468" ? { ok: true } : { ok: false, remaining: 4 };
+  const dots = $("dots");
+  if (res.ok) {
+    dots.className = "dots good"; message("Accès autorisé", "good");
+    setTimeout(() => unlocked(), 450);
+    return;
   }
+  dots.className = "dots bad";
+  message(res.message || (res.remaining ? `Code incorrect · ${res.remaining} essai${res.remaining > 1 ? "s" : ""} restant${res.remaining > 1 ? "s" : ""}` : "Code incorrect"), "bad");
+  state.mood = 1; state.moodColor = [255, 77, 94];
+  setTimeout(() => { dots.className = "dots"; state.entry = ""; renderDots(); state.busy = false; }, 650);
 }
-for (const k of ["1","2","3","4","5","6","7","8","9","C","0","←"]) {
-  const b = document.createElement("button");
-  if (k === "C") b.className = "wide";
-  b.textContent = k;
-  b.onclick = () => press(k === "←" ? (entry = entry.slice(0, -1), render(), null) : k);
-  if (k === "←") b.onclick = () => { entry = entry.slice(0, -1); render(); };
-  else if (k === "C") b.onclick = () => press("C");
-  else b.onclick = () => press(k);
-  pad.append(b);
+function unlocked(name) {
+  if (state.done) return;
+  state.done = performance.now(); state.mood = 1; state.moodColor = [95, 227, 166];
+  $("welcome").textContent = name ? `Bon retour, ${name}` : "Bon retour";
+  document.body.classList.add("done");
+  if (!agent()) setTimeout(() => {  // aperçu : on revient à l'écran verrouillé pour rejouer
+    document.body.classList.remove("done", "open");
+    Object.assign(state, { done: 0, mood: 0, entry: "", busy: false });
+    $("dots").className = "dots"; renderDots(); message("Tape-le, puis OK");
+  }, 3800);
 }
-render();
+$("open").onclick = () => openPad(true);
+$("close").onclick = () => openPad(false);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { openPad(false); return; }
+  if (/^\d$/.test(e.key)) press(e.key);
+  else if (e.key === "Backspace") press("⌫");
+  else if (e.key === "Enter") press("OK");
+  else return;
+  e.preventDefault();
+});
+
+window.opal = {
+  update(s) {
+    if (s.online !== undefined) { $("net").textContent = s.online ? "En ligne" : "Hors ligne"; $("netdot").classList.toggle("off", !s.online); }
+    if (s.machines) $("machines").textContent = s.machines;
+    if (s.codeLength) { state.codeLength = s.codeLength; renderDots(); }
+    if (s.reason) {
+      const at = s.since ? new Date(s.since).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }) : "";
+      $("reason").innerHTML = "";
+      const b = document.createElement("b"); b.textContent = s.reason;
+      $("reason").append(b, at ? ` · ${at}` : "");
+    }
+  },
+  unlocked,
+};
+if (!agent()) {
+  $("demo").hidden = false;
+  window.opal.update({ reason: "Visage inconnu devant Opal", since: Date.now() - 4 * 60000 });
+}
+renderDots();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Le ciel : nébuleuse, étoiles, rayon, orbites et la sphère du gardien (canvas 2D, additif).
+// ─────────────────────────────────────────────────────────────────────────────
+const sky = $("sky"), g = sky.getContext("2d");
+const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+let W = 0, H = 0, DPR = 1;
+const mouse = { x: 0, y: 0, tx: 0, ty: 0 };
+addEventListener("pointermove", (e) => { mouse.tx = e.clientX / innerWidth - 0.5; mouse.ty = e.clientY / innerHeight - 0.5; });
+
+function sprite(r, stops) {  // point lumineux pré-rendu (bien plus rapide que des dégradés à chaque image)
+  const c = document.createElement("canvas"); c.width = c.height = r * 2;
+  const x = c.getContext("2d"), gr = x.createRadialGradient(r, r, 0, r, r, r);
+  for (const [o, col] of stops) gr.addColorStop(o, col);
+  x.fillStyle = gr; x.fillRect(0, 0, r * 2, r * 2); return c;
+}
+const GLOW = sprite(32, [[0, "rgba(255,255,255,1)"], [0.18, "rgba(255,225,215,.85)"], [0.45, "rgba(255,120,160,.25)"], [1, "rgba(255,90,140,0)"]]);
+// Trois teintes de poussière pour la sphère : rose, violet, pêche.
+const DUST = [
+  sprite(64, [[0, "rgba(255,150,185,.6)"], [0.5, "rgba(255,80,140,.14)"], [1, "rgba(255,80,130,0)"]]),
+  sprite(64, [[0, "rgba(185,150,255,.6)"], [0.5, "rgba(130,90,255,.14)"], [1, "rgba(120,80,255,0)"]]),
+  sprite(64, [[0, "rgba(255,210,180,.65)"], [0.5, "rgba(255,150,120,.14)"], [1, "rgba(255,140,110,0)"]]),
+];
+
+// Points de la sphère (répartition de Fibonacci) et étoiles du fond.
+const N = 1500, SPHERE = [];
+for (let i = 0; i < N; i++) {
+  const y = 1 - (i / (N - 1)) * 2, r = Math.sqrt(1 - y * y), th = i * 2.399963;
+  SPHERE.push({ x: Math.cos(th) * r, y, z: Math.sin(th) * r, j: Math.random(), s: 0.5 + Math.random() });
+}
+const STARS = Array.from({ length: 240 }, () => ({ x: Math.random(), y: Math.random(), r: Math.random() * 1.2 + 0.2, p: Math.random() * 6.3, v: 0.4 + Math.random() * 1.6, d: Math.random() }));
+const ORBITS = [
+  { rx: 1.62, ry: 0.36, rot: -0.12, sp: 0.16, n: 3 },
+  { rx: 2.05, ry: 0.62, rot: 0.42, sp: -0.11, n: 2 },
+  { rx: 1.35, ry: 0.92, rot: -0.62, sp: 0.21, n: 2 },
+];
+
+function resize() {
+  DPR = Math.min(devicePixelRatio || 1, 1.75);
+  W = innerWidth; H = innerHeight;
+  sky.width = Math.round(W * DPR); sky.height = Math.round(H * DPR);
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+addEventListener("resize", resize); resize();
+
+const lerp = (a, b, t) => a + (b - a) * t;
+function mix(c, t) {  // teinte de base mêlée à la couleur d'humeur (rouge erreur, vert succès)
+  const m = state.mood;
+  return `rgba(${Math.round(lerp(c[0], state.moodColor[0], m))},${Math.round(lerp(c[1], state.moodColor[1], m))},${Math.round(lerp(c[2], state.moodColor[2], m))},${t})`;
+}
+
+function frame(ms) {
+  const t = reduce ? ms * 0.00025 : ms * 0.001;
+  mouse.x = lerp(mouse.x, mouse.tx, 0.04); mouse.y = lerp(mouse.y, mouse.ty, 0.04);
+  state.mood = Math.max(state.done ? 1 : 0, state.mood - 0.012);
+  const openK = state.open = lerp(state.open, document.body.classList.contains("open") ? 1 : 0, 0.08);
+  const doneK = state.done ? Math.min(1, (ms - state.done) / 1400) : 0;
+
+  const cx = W / 2 + mouse.x * 18, cy = H * lerp(0.42, 0.25, openK) + mouse.y * 12;
+  const R = Math.min(W, H) * lerp(0.205, 0.13, openK) * (1 + doneK * 0.9);
+
+  // Fond : noir bordeaux, halo central.
+  g.globalCompositeOperation = "source-over";
+  g.fillStyle = "#07040a"; g.fillRect(0, 0, W, H);
+  const bgGlow = g.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.7);
+  bgGlow.addColorStop(0, "rgba(70,14,32,.55)"); bgGlow.addColorStop(0.45, "rgba(30,6,16,.35)"); bgGlow.addColorStop(1, "rgba(7,4,10,0)");
+  g.fillStyle = bgGlow; g.fillRect(0, 0, W, H);
+
+  // Rubans de nébuleuse qui traversent l'écran.
+  g.globalCompositeOperation = "lighter";
+  for (let k = 0; k < 3; k++) {
+    const base = H * (0.36 + k * 0.1) - mouse.y * 30 * (k + 1), amp = H * (0.09 + k * 0.03), ph = t * (0.12 + k * 0.05) + k * 2;
+    g.beginPath();
+    for (let x = -40; x <= W + 40; x += 24) g.lineTo(x, base + Math.sin(x * 0.0024 + ph) * amp + Math.sin(x * 0.006 - ph * 1.3) * amp * 0.25);
+    for (let x = W + 40; x >= -40; x -= 24) g.lineTo(x, base + 26 + k * 10 + Math.sin(x * 0.0024 + ph + 0.4) * amp * 1.1);
+    const band = g.createLinearGradient(0, 0, W, 0);
+    band.addColorStop(0, "rgba(120,20,50,0)"); band.addColorStop(0.18, mix([140, 26, 62], 0.16));
+    band.addColorStop(0.5, mix([120, 22, 56], 0.05)); band.addColorStop(0.82, mix([150, 30, 70], 0.16)); band.addColorStop(1, "rgba(120,20,50,0)");
+    g.fillStyle = band; g.fill();
+  }
+
+  // Étoiles qui scintillent (léger parallaxe selon leur profondeur).
+  for (const s of STARS) {
+    const a = 0.25 + 0.75 * Math.abs(Math.sin(t * s.v + s.p));
+    g.fillStyle = `rgba(255,${200 + s.d * 40},${215 + s.d * 30},${a * (0.35 + s.d * 0.5)})`;
+    g.fillRect(s.x * W - mouse.x * 30 * s.d, s.y * H - mouse.y * 20 * s.d, s.r, s.r);
+  }
+
+  // Rayon vertical : des points, et une lueur qui descend vers le cadenas.
+  const lockY = H - 200, beamTop = 28, travel = (t * 0.32) % 1;
+  for (let y = beamTop; y < cy - R * 1.08; y += 22) {
+    const a = 0.25 + 0.6 * Math.max(0, 1 - Math.abs((y - beamTop) / (cy - beamTop) - travel) * 6);
+    g.globalAlpha = a; g.drawImage(GLOW, cx - 5, y - 5, 10, 10);
+  }
+  if (!openK || openK < 0.5) {
+    for (let y = cy + R * 1.1; y < lockY; y += 22) {
+      const a = (0.25 + 0.6 * Math.max(0, 1 - Math.abs((y - cy) / (lockY - cy) - travel) * 6)) * (1 - openK * 2);
+      g.globalAlpha = a; g.drawImage(GLOW, cx - 5, y - 5, 10, 10);
+    }
+  }
+  g.globalAlpha = 1;
+
+  // Rotation de la sphère.
+  const ay = t * 0.22, ax = 0.42 + mouse.y * 0.3;
+  const cyR = Math.cos(ay), syR = Math.sin(ay), cxR = Math.cos(ax), sxR = Math.sin(ax);
+  const project = (x, y, z, rad) => {
+    const x1 = x * cyR + z * syR, z1 = -x * syR + z * cyR;
+    const y1 = y * cxR - z1 * sxR, z2 = y * sxR + z1 * cxR;
+    const k = 1 + z2 * 0.18;
+    return [cx + x1 * rad * k, cy + y1 * rad * k, z2];
+  };
+
+  // Orbites : la moitié arrière d'abord (cachée en partie par la sphère), l'avant ensuite.
+  const orbitPoint = (o, a) => {
+    const ex = Math.cos(a) * o.rx * R, ey = Math.sin(a) * o.ry * R, cr = Math.cos(o.rot), sr = Math.sin(o.rot);
+    return [cx + ex * cr - ey * sr, cy + ex * sr + ey * cr, Math.sin(a)];
+  };
+  const drawOrbits = (front) => {
+    for (const o of ORBITS) {
+      g.strokeStyle = mix([255, 175, 190], front ? 0.22 : 0.08); g.lineWidth = 1;
+      g.beginPath();
+      for (let a = front ? 0 : Math.PI; a <= (front ? Math.PI : Math.PI * 2) + 0.001; a += 0.04) {
+        const [x, y] = orbitPoint(o, a); a === (front ? 0 : Math.PI) ? g.moveTo(x, y) : g.lineTo(x, y);
+      }
+      g.stroke();
+      for (let i = 0; i < o.n; i++) {
+        const base = t * o.sp * 6.283 + i * (6.283 / o.n);
+        for (let k = 14; k >= 0; k--) {  // traînée
+          const a = base - k * 0.035 * Math.sign(o.sp), [x, y, depth] = orbitPoint(o, a);
+          if ((depth >= 0) !== front) continue;
+          const behind = !front && Math.hypot(x - cx, y - cy) < R * 0.98;
+          g.globalAlpha = (1 - k / 15) * (behind ? 0.18 : 0.9);
+          const size = k === 0 ? 16 : 7;
+          g.drawImage(GLOW, x - size / 2, y - size / 2, size, size);
+        }
+      }
+      g.globalAlpha = 1;
+    }
+  };
+  drawOrbits(false);
+
+  // Halo de la sphère.
+  const halo = g.createRadialGradient(cx, cy, R * 0.7, cx, cy, R * 1.55);
+  halo.addColorStop(0, mix([255, 110, 150], 0.0)); halo.addColorStop(0.42, mix([255, 110, 150], 0.22));
+  halo.addColorStop(0.56, mix([255, 90, 140], 0.07)); halo.addColorStop(1, mix([255, 80, 130], 0));
+  g.fillStyle = halo; g.globalAlpha = 1 - doneK; g.beginPath(); g.arc(cx, cy, R * 1.55, 0, 6.283); g.fill();
+
+  // Corps de la bulle : verre sombre au centre, bord qui s'illumine (effet de Fresnel).
+  const glass = g.createRadialGradient(cx - R * 0.25, cy - R * 0.3, R * 0.1, cx, cy, R * 1.02);
+  glass.addColorStop(0, mix([90, 30, 70], 0.10)); glass.addColorStop(0.7, mix([150, 40, 90], 0.10));
+  glass.addColorStop(0.93, mix([255, 120, 170], 0.30)); glass.addColorStop(1, mix([255, 150, 190], 0));
+  g.fillStyle = glass; g.beginPath(); g.arc(cx, cy, R * 1.02, 0, 6.283); g.fill();
+
+  // Nuage de points en 3D.
+  for (const p of SPHERE) {
+    const wob = 1 + 0.035 * Math.sin(t * 1.4 + p.j * 6.283) + doneK * p.j * 0.8;
+    const [x, y, z] = project(p.x, p.y, p.z, R * wob);
+    const front = (z + 1) / 2;
+    // Plus lumineux au bord apparent de la sphère (là où on la voit « par la tranche »).
+    const edge = 1 - Math.abs(z);
+    const size = (1.6 + front * 3.2 + edge * 1.6) * p.s;
+    g.globalAlpha = (0.07 + 0.55 * front * front + 0.35 * edge * edge * edge) * (1 - doneK);
+    g.drawImage(p.j > 0.9 ? GLOW : DUST[Math.floor(p.j * 30) % 3], x - size, y - size, size * 2, size * 2);
+  }
+
+  // Liseré lumineux sur le pourtour.
+  g.globalAlpha = (0.55 + 0.15 * Math.sin(t * 1.3)) * (1 - doneK);
+  g.strokeStyle = mix([255, 190, 210], 0.55); g.lineWidth = 1.4;
+  g.beginPath(); g.arc(cx, cy, R * 1.005, 0, 6.283); g.stroke();
+  g.strokeStyle = mix([255, 120, 170], 0.18); g.lineWidth = 7;
+  g.beginPath(); g.arc(cx, cy, R * 1.0, 0, 6.283); g.stroke();
+  g.globalAlpha = 1;
+
+  // Filaments en spirale (le tourbillon intérieur).
+  g.lineWidth = 1.1;
+  for (let k = 0; k < 8; k++) {
+    let prev = null;
+    for (let i = 0; i <= 64; i++) {
+      const u = i / 64, lon = k * 0.785 + u * 3.6 + t * 0.35, lat = Math.sin(u * Math.PI) * (k % 2 ? 1.05 : -1.05) * 0.85;
+      const pt = project(Math.cos(lat) * Math.cos(lon), Math.sin(lat), Math.cos(lat) * Math.sin(lon), R * 0.985);
+      if (prev) {
+        const front = ((pt[2] + prev[2]) / 2 + 1) / 2;
+        g.strokeStyle = k % 3 === 0 ? mix([190, 160, 255], 0.05 + 0.4 * front * front) : mix([255, 160, 185], 0.05 + 0.45 * front * front);
+        g.globalAlpha = 1 - doneK;
+        g.beginPath(); g.moveTo(prev[0], prev[1]); g.lineTo(pt[0], pt[1]); g.stroke();
+      }
+      prev = pt;
+    }
+  }
+
+  // Bras lumineux vers le cœur (le « yin-yang » de la référence).
+  for (let arm = 0; arm < 2; arm++) {
+    for (let i = 0; i < 120; i++) {
+      const s = i / 120, ang = s * 4.4 + arm * Math.PI + t * 0.5, rr = R * 0.86 * Math.pow(s, 0.85);
+      const x = cx + Math.cos(ang) * rr, y = cy + Math.sin(ang) * rr * 0.9;
+      g.globalAlpha = (1 - s) * 0.5 * (1 - doneK);
+      const size = 3 + (1 - s) * 9;
+      g.drawImage(GLOW, x - size / 2, y - size / 2, size, size);
+    }
+  }
+
+  // Cœur : lueur qui respire (un large voile pêche, puis le point blanc).
+  const pulse = 1 + 0.08 * Math.sin(t * 2.1);
+  g.globalAlpha = 0.55 * (1 - doneK);
+  g.drawImage(DUST[2], cx - R * 0.8, cy - R * 0.8, R * 1.6, R * 1.6);
+  g.globalAlpha = 1;
+  const core = g.createRadialGradient(cx, cy, 0, cx, cy, R * 0.55 * pulse);
+  core.addColorStop(0, `rgba(255,255,255,${0.95 * (1 - doneK * 0.5)})`); core.addColorStop(0.12, mix([255, 228, 214], 0.8));
+  core.addColorStop(0.4, mix([255, 130, 160], 0.22)); core.addColorStop(1, mix([255, 90, 140], 0));
+  g.fillStyle = core; g.beginPath(); g.arc(cx, cy, R * 0.55 * pulse * (1 + doneK * 3), 0, 6.283); g.fill();
+  // Rayons fins autour du cœur.
+  g.globalAlpha = 0.18 * (1 - doneK); g.strokeStyle = "rgba(255,230,220,1)"; g.lineWidth = 1;
+  for (let i = 0; i < 6; i++) {
+    const a = i * 1.047 + t * 0.1, l = R * (0.35 + 0.1 * Math.sin(t * 1.7 + i));
+    g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + Math.cos(a) * l, cy + Math.sin(a) * l); g.stroke();
+  }
+  g.globalAlpha = 1;
+
+  drawOrbits(true);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
 </script>
-</body>
-</html>
