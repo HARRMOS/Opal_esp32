@@ -384,8 +384,9 @@ void setup() {
   pinMode(PTT_PIN, INPUT_PULLUP);
   Serial.printf("\nOpal — PSRAM %lu Ko libre\n", (unsigned long)(ESP.getFreePsram() / 1024));
 
-  eyes::begin();  // les yeux tournent seuls, un œil par cœur
-  eyes::showScene(eyes::Scene::Boot, 3800);
+  eyes::begin();  // les yeux tournent seuls, un œil par cœur (démarrage sombre = peu de courant)
+  // L'animation de démarrage (écrans bien allumés) est jouée APRÈS le WiFi : sinon son pic de
+  // courant s'ajoute à celui de l'association WiFi et déclenche le brownout sur une alim juste.
   head::begin();  // tête au centre (moment de visser le palonnier bien droit)
   setState(State::Connecting);
 
@@ -409,6 +410,7 @@ void setup() {
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);  // latence audio
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);  // boîte proche du routeur : réduit le pic de courant radio
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.printf("WiFi %s", WIFI_SSID);
   while (WiFi.status() != WL_CONNECTED) {
@@ -437,6 +439,9 @@ void setup() {
   ws.onEvent(onWsEvent);
   ws.setReconnectInterval(2000);
   ws.enableHeartbeat(15000, 3000, 2);
+
+  // WiFi associé : le gros pic de courant est passé, on peut jouer l'animation de démarrage.
+  eyes::showScene(eyes::Scene::Boot, 2500);
 }
 
 void loop() {
