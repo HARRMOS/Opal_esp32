@@ -16,6 +16,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 FRESH_S = 0.8  # au-delà, une détection n'est plus dessinée
+OBJECTS_FRESH_S = 1.6  # les objets ne sont cherchés qu'une fois par seconde
+YELLOW = (242, 201, 76)
 
 GREEN, ORANGE, GREY, BLUE = (79, 209, 139), (242, 162, 74), (154, 166, 189), (90, 169, 255)
 GESTURES = {"pouce_haut": "Pouce levé", "pouce_bas": "Pouce baissé", "main_ouverte": "Main ouverte",
@@ -126,10 +128,25 @@ def draw(img: np.ndarray, info: dict[str, Any]) -> np.ndarray:
             labels.append((GESTURES["bras_croises"], min(pts[4][0], pts[5][0]),
                            min(pts[4][1], pts[5][1]), ORANGE))
 
+    # Objets (analysés une fois par seconde : gardés un peu plus longtemps à l'écran).
+    objects = info.get("objects")
+    people = 0
+    if objects and now - objects.get("at", 0) < OBJECTS_FRESH_S:
+        for obj in objects.get("items") or []:
+            if obj["label"] == "person":  # le visage a déjà son cadre : on compte seulement
+                people += 1
+                continue
+            x, y, bw, bh = obj["box"]
+            x1, y1, x2, y2 = int(x * w), int(y * h), int((x + bw) * w), int((y + bh) * h)
+            cv2.rectangle(img, (x1, y1), (x2, y2), YELLOW[::-1], max(1, t - 1), cv2.LINE_AA)
+            labels.append((f"{obj['fr']}  {round(obj['score'] * 100)} %", x1, y1, YELLOW))
+
     # Bandeau d'état en haut à gauche.
     who = info.get("who")
     state = (f"{who} est là" if who else "Inconnu" if who == "" else "Quelqu'un est là"
              ) if info.get("present") else "Personne"
+    if people >= 2:
+        state += f"  ·  {people} personnes"
     last = info.get("last_gesture")
     if last and now - last["at"] < 5:
         state += f"  ·  {GESTURES.get(last['name'], last['name'])} !"

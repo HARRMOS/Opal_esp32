@@ -26,6 +26,7 @@ import hud
 from faces import FaceBook
 from gestures import GestureDetector
 from pose import PoseDetector
+from objects import ObjectDetector
 from expression import ExpressionReader, looks_at_camera
 from logs import log
 
@@ -205,6 +206,13 @@ class CameraHub:
         except cv2.error as exc:
             log("expressions_disabled", error=str(exc)[:120])
             self.expressions = None
+        # Objets autour de toi (téléphone, tasse…) : une analyse par seconde quand tu es là.
+        try:
+            self.objects: ObjectDetector | None = ObjectDetector()
+        except cv2.error as exc:
+            log("objects_disabled", error=str(exc)[:120])
+            self.objects = None
+        self._objects_check = 0.0
         self.on_expression: Callable[[str], Awaitable[None]] | None = None
         self.on_eye_contact: Callable[[], Awaitable[None]] | None = None
         self._expr_check = 0.0
@@ -408,9 +416,9 @@ class CameraHub:
             self._analyzing = True
             asyncio.create_task(self._analyze(jpeg))
 
-    def _detect(self, jpeg: bytes) -> tuple[Face | None, tuple[str, float] | None, Any, Any]:
-        """Visage, identité, main et bras. Main / bras : (geste, vu) s'ils ont été cherchés
-        sur cette image, sinon None."""
+    def _detect(self, jpeg: bytes) -> tuple[Face | None, tuple[str, float] | None, Any, Any, Any]:
+        """Visage, identité, main, bras et objets. Main / bras : (geste, vu), objets : liste,
+        s'ils ont été cherchés sur cette image, sinon None."""
         face = self._tracker.find(jpeg)
         who = self._identify(face) if face is not None else None
         if face is not None:
@@ -418,12 +426,14 @@ class CameraHub:
             if self.expressions is not None and self.present and time.time() - self._expr_check > 0.5:
                 self._expr_check = time.time()
                 face.expression = self.expressions.read(face.img, face.row)
-        hand = arms = None
-        # Un geste suppose quelqu'un devant la caméra : main 3 fois/s, bras 2 fois/s au plus.
+        hand = arms = objects = None
+        # Un geste suppose quelqu'un devant la caméra : main 3 fois/s, bras 2 fois/s au plus,
+        # objets 1 fois/s.
         now = time.time()
         want_hand = self.gestures is not None and self.present and now - self._gesture_check > 0.33
         want_arms = self.poses is not None and self.present and now - self._pose_check > 0.5
-        if want_hand or want_arms:
+        want_objects = self.objects is not None and self.present and now - self._objects_check > 1.0
+        if want_hand or want_arms or want_objects:
             img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
             if img is not None and want_hand:
                 self._gesture_check = now
@@ -431,7 +441,10 @@ class CameraHub:
             if img is not None and want_arms:
                 self._pose_check = now
                 arms = self.poses.detect(img)
-        return face, who, hand, arms
+            if img is not None and want_objects:
+                self._objects_check = now
+                objects = self.objects.detect(img)
+        return face, who, hand, arms, objects
 
     async def _on_face_read(self, face: Face, now: float) -> None:
         """Expression vue deux fois de suite → on_expression ; regard soutenu → on_eye_contact."""
@@ -479,7 +492,7 @@ class CameraHub:
 
     async def _analyze(self, jpeg: bytes) -> None:
         try:
-            face, who, hand, arms = await asyncio.to_thread(self._detect, jpeg)
+            face, who, hand, arms, objects = await asyncio.to_thread(self._detect, jpeg)
         finally:
             self._analyzing = False
         now = time.time()
@@ -494,6 +507,8 @@ class CameraHub:
                                  "score": self._last_score, "at": now, "facing": face.facing,
                                  "expression": face.expression[0] if face.expression else last_expr}
             await self._on_face_read(face, now)
+        if objects is not None:  # les objets ont été cherchés sur cette image
+            self.seen["objects"] = {"items": objects, "at": now}
         if hand is not None:  # la main a été cherchée sur cette image
             gesture, seen_hand = hand
             if seen_hand:

@@ -274,7 +274,19 @@ function drawVision(s) {
     octx.stroke();
     if (crossed) tag("Bras croisés", Math.min(p[4][0], p[5][0]), Math.min(p[4][1], p[5][1]), color);
   }
+  // Objets : analysés une fois par seconde, donc gardés un peu plus longtemps à l'écran.
+  let people = 0;
+  if (s.objects && s.now - s.objects.at < 1.6) {
+    for (const o of s.objects.items || []) {
+      if (o.label === "person") { people++; continue; }
+      const [x, y, w, h] = o.box, xa = px(x), xb = px(x + w), left = Math.min(xa, xb);
+      octx.strokeStyle = "#f2c94c"; octx.lineWidth = Math.max(2, ov.width / 260);
+      octx.strokeRect(left, y * H, Math.abs(xb - xa), h * H);
+      tag(`${o.fr}  ${Math.round(o.score * 100)} %`, left, y * H, "#f2c94c");
+    }
+  }
   let state = !s.present ? "Personne" : s.who ? `${s.who} est là` : s.who === "" ? "Inconnu" : "Quelqu'un est là";
+  if (people >= 2) state += `  ·  ${people} personnes`;
   const last = s.last_gesture;
   if (last && s.now - last.at < 5) state += `  ·  ${GESTES[last.name] || last.name} !`;
   if (running && Date.now() > spokeUntil) say(`Opal voit : ${state}`);

@@ -40,6 +40,11 @@ RUN curl -fsSL -o person_detection_mediapipe.onnx \
       47fd5599d6fa17608f03e0eb0ae230baa6e597d7e8a2c8199fe00abea55a701f person_detection_mediapipe.onnx \
       9d89c599319a18fb7d2e28451a883476164543182bafca5f09eb2cf767ed2f3f pose_estimation_mediapipe.onnx \
       | sha256sum -c -
+# Objets (NanoDet-Plus, opencv_zoo, 80 catégories COCO), empreinte vérifiée
+RUN curl -fsSL -o object_detection_nanodet.onnx \
+      https://github.com/opencv/opencv_zoo/raw/main/models/object_detection_nanodet/object_detection_nanodet_2022nov.onnx \
+ && echo "4b82da9944b88577175ee23a459dce2e26e6e4be573def65b1055dc2d9720186  object_detection_nanodet.onnx" \
+      | sha256sum -c -
 # Expression du visage (MobileFaceNet, opencv_zoo), empreinte vérifiée
 RUN curl -fsSL -o facial_expression_recognition.onnx \
       https://github.com/opencv/opencv_zoo/raw/main/models/facial_expression_recognition/facial_expression_recognition_mobilefacenet_2022july.onnx \
