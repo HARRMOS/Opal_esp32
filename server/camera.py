@@ -212,7 +212,7 @@ class CameraHub:
         except cv2.error as exc:
             log("objects_disabled", error=str(exc)[:120])
             self.objects = None
-        self._objects_check = 0.0
+        self._objects_task: asyncio.Task[None] | None = None
         self.on_expression: Callable[[str], Awaitable[None]] | None = None
         self.on_eye_contact: Callable[[], Awaitable[None]] | None = None
         self._expr_check = 0.0
@@ -293,6 +293,8 @@ class CameraHub:
             self.present_since = time.time()  # « personne depuis » compte depuis la connexion
         if self._watchdog is None or self._watchdog.done():
             self._watchdog = asyncio.create_task(self._presence_watchdog())
+        if self.objects is not None and (self._objects_task is None or self._objects_task.done()):
+            self._objects_task = asyncio.create_task(self._objects_loop())
 
     async def speak(self, tts: Any, sentences: list[str], rate: int) -> int:
         """Fait parler Opal par la page caméra (iPhone / Mac) : texte puis PCM 16 bits.
@@ -416,9 +418,9 @@ class CameraHub:
             self._analyzing = True
             asyncio.create_task(self._analyze(jpeg))
 
-    def _detect(self, jpeg: bytes) -> tuple[Face | None, tuple[str, float] | None, Any, Any, Any]:
-        """Visage, identité, main, bras et objets. Main / bras : (geste, vu), objets : liste,
-        s'ils ont été cherchés sur cette image, sinon None."""
+    def _detect(self, jpeg: bytes) -> tuple[Face | None, tuple[str, float] | None, Any, Any]:
+        """Visage, identité, main et bras. Main / bras : (geste, vu) s'ils ont été cherchés
+        sur cette image, sinon None."""
         face = self._tracker.find(jpeg)
         who = self._identify(face) if face is not None else None
         if face is not None:
@@ -426,14 +428,12 @@ class CameraHub:
             if self.expressions is not None and self.present and time.time() - self._expr_check > 0.5:
                 self._expr_check = time.time()
                 face.expression = self.expressions.read(face.img, face.row)
-        hand = arms = objects = None
-        # Un geste suppose quelqu'un devant la caméra : main 3 fois/s, bras 2 fois/s au plus,
-        # objets 1 fois/s.
+        hand = arms = None
+        # Un geste suppose quelqu'un devant la caméra : main 3 fois/s, bras 2 fois/s au plus.
         now = time.time()
         want_hand = self.gestures is not None and self.present and now - self._gesture_check > 0.33
         want_arms = self.poses is not None and self.present and now - self._pose_check > 0.5
-        want_objects = self.objects is not None and self.present and now - self._objects_check > 1.0
-        if want_hand or want_arms or want_objects:
+        if want_hand or want_arms:
             img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
             if img is not None and want_hand:
                 self._gesture_check = now
@@ -441,10 +441,7 @@ class CameraHub:
             if img is not None and want_arms:
                 self._pose_check = now
                 arms = self.poses.detect(img)
-            if img is not None and want_objects:
-                self._objects_check = now
-                objects = self.objects.detect(img)
-        return face, who, hand, arms, objects
+        return face, who, hand, arms
 
     async def _on_face_read(self, face: Face, now: float) -> None:
         """Expression vue deux fois de suite → on_expression ; regard soutenu → on_eye_contact."""
@@ -492,7 +489,7 @@ class CameraHub:
 
     async def _analyze(self, jpeg: bytes) -> None:
         try:
-            face, who, hand, arms, objects = await asyncio.to_thread(self._detect, jpeg)
+            face, who, hand, arms = await asyncio.to_thread(self._detect, jpeg)
         finally:
             self._analyzing = False
         now = time.time()
@@ -507,8 +504,6 @@ class CameraHub:
                                  "score": self._last_score, "at": now, "facing": face.facing,
                                  "expression": face.expression[0] if face.expression else last_expr}
             await self._on_face_read(face, now)
-        if objects is not None:  # les objets ont été cherchés sur cette image
-            self.seen["objects"] = {"items": objects, "at": now}
         if hand is not None:  # la main a été cherchée sur cette image
             gesture, seen_hand = hand
             if seen_hand:
@@ -535,6 +530,22 @@ class CameraHub:
             await self._on_gaze(max(-1.0, min(1.0, x)), max(-1.0, min(1.0, y)))
             if not self.present and sum(self._hits) >= PRESENCE_ARRIVE_HITS:
                 await self._set_present(True)
+
+    async def _objects_loop(self) -> None:
+        """Objets environ une fois par seconde, à part du suivi du visage : leur analyse
+        (~0,2 s sur le VPS) tourne sur un autre cœur au lieu de figer le suivi."""
+        while self.ws is not None:
+            await asyncio.sleep(1.0)
+            jpeg = self.frame
+            if not self.present or jpeg is None:
+                continue
+            items = await asyncio.to_thread(self._detect_objects, jpeg)
+            if items is not None:
+                self.seen["objects"] = {"items": items, "at": time.time()}
+
+    def _detect_objects(self, jpeg: bytes) -> list[dict] | None:
+        img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        return self.objects.detect(img) if img is not None and self.objects else None
 
     async def _presence_watchdog(self) -> None:
         while self.ws is not None:
