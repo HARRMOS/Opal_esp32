@@ -12,3 +12,9 @@ __pycache__/
 # Jeton du pont sur le VPS
 deploy/opal-bridge.env
 deploy/models/
+
+# Fichiers temporaires d'éditeur (une copie vim de opal-bridge.env contient les secrets)
+*.swp
+*.swo
+*~
+*.bak
