@@ -482,6 +482,11 @@ def run_fallback(config: dict) -> None:
 
 
 def main() -> None:
+    # Journal ligne par ligne (sinon, redirigé vers un fichier par launchd, il n'apparaît
+    # qu'au bout de plusieurs Ko). Sous pythonw (Windows), il n'y a pas de sortie du tout.
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None:
+            stream.reconfigure(line_buffering=True)
     if IS_MAC and os.environ.get("SYSTEM_VERSION_COMPAT") != "0":
         # macOS 26 annonce « 16 » aux programmes compilés avec un ancien SDK, et Tk refuse
         # alors de démarrer (« macOS 26 or later required, have instead 16 »). On se relance
