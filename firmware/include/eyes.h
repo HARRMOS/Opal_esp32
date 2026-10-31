@@ -35,7 +35,7 @@ void setStyle(Style style);
 
 // Animations plein écran (autres que des yeux), dessinées à la place des yeux.
 enum class Scene : uint8_t {
-  None, Hearts, Clock, Weather, Music, Thinking, Timer, Sleep, Message, Dizzy, Matrix, Boot
+  None, Clock, Weather, Music, Thinking, Timer, Sleep, Message, Dizzy, Matrix, Boot
 };
 // Données des animations qui en ont besoin (météo, minuteur, messages).
 struct SceneInfo {

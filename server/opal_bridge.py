@@ -125,7 +125,6 @@ CLOCK_AFTER_S = 180.0  # personne devant la caméra depuis 3 min : horloge de bu
 # Gardien des PC : un inconnu seul devant la caméra pendant GUARD_LOCK_AFTER_S → verrouillage.
 GUARD_ENABLED = os.environ.get("OPAL_GUARD_ENABLED", "1") == "1"
 GUARD_LOCK_AFTER_S = float(os.environ.get("OPAL_GUARD_LOCK_AFTER_S", "30"))
-HEARTS_EVERY_S = 180.0  # au plus un cœur de sourire toutes les 3 min
 BRIEFING_PROMPT = (
     "[Opal Box] {name} arrive ce matin. Voici son briefing du jour :\n{text}\n"
     "Dis-lui l'essentiel en trois phrases maximum."
@@ -292,7 +291,6 @@ class OpalBridge:
         self._sad_seen: deque[float] = deque(maxlen=6)
         self._scene: tuple[str | None, float] = (None, 0.0)  # (genre, fin) de l'animation affichée
         self._clock_on = False
-        self._hearts_at = -HEARTS_EVERY_S
         self.guard = GuardHub()
         self._pc_locked = False
         self._unlock_after_absence = False
@@ -466,8 +464,9 @@ class OpalBridge:
             reaction = {"type": "eyes", "mood": "sad", "look": [0, 0.6], "pupil": 0.15,
                         "blink": True, "hold_ms": 4000}
         sent = await self.send_to_devices(reaction)
-        # Cœurs pour un pouce levé, spirales « étourdi » pour un pouce baissé.
-        await self.show_scene("coeurs" if approved else "etourdi", 4000 if approved else 2500, "reaction")
+        # Pouce baissé : spirales « étourdi » (pouce levé : le grand sourire suffit).
+        if not approved:
+            await self.show_scene("etourdi", 2500, "reaction")
         # Le cou suit : balancement content, ou « non » de la tête.
         await self.send_to_devices({"type": "head", "gesture": "wiggle" if approved else "shake"})
         log("gesture_reaction", gesture=gesture, devices=sent)
@@ -501,10 +500,6 @@ class OpalBridge:
         if self._guarding or self._asleep or (eyes := EXPRESSION_EYES.get(expression)) is None:
             return
         await self.send_to_devices({"type": "eyes", **eyes})
-        now = time.monotonic()
-        if expression == "happy" and now - self._hearts_at > HEARTS_EVERY_S:
-            self._hearts_at = now
-            await self.show_scene("coeurs", 3000, "reaction")
         if expression not in ("sad", "fearful"):
             return
         # Triste plusieurs fois en quelques minutes : Opal dit un mot gentil (1 fois/heure).

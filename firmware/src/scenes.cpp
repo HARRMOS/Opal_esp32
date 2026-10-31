@@ -41,16 +41,7 @@ void text(Sprite& s, const char* str, int x, int y, const lgfx::IFont* font, uin
   s.drawString(str, x, y);
 }
 
-// Cœur : deux lobes + pointe.
-void heart(Sprite& s, float x, float y, float size, uint16_t c) {
-  const float r = size * 0.30f;
-  s.fillSmoothCircle(x - size * 0.26f, y - size * 0.10f, r, c);
-  s.fillSmoothCircle(x + size * 0.26f, y - size * 0.10f, r, c);
-  s.fillTriangle(x - size * 0.545f, y - size * 0.02f, x + size * 0.545f, y - size * 0.02f, x,
-                 y + size * 0.55f, c);
-}
-
-// Particules par œil (petits cœurs, gouttes, Z…), remises à zéro à chaque animation.
+// Particules par œil (gouttes, Z…), remises à zéro à chaque animation.
 struct Particle {
   float x, y, v, size, life;
   bool on;
@@ -86,22 +77,6 @@ void reset(int e, Scene scene) {
 }
 
 // ── Les animations ─────────────────────────────────────────────────────────
-
-void hearts(Sprite& s, int e, uint32_t t) {
-  s.fillScreen(hex(0x12030a));
-  const float beat = 1 + 0.12f * max(sinf(t * 0.009f), 0.f) + 0.06f * max(sinf(t * 0.009f - 1.2f), 0.f);
-  if (randf(0, 1) < 0.06f)
-    if (Particle* p = spawn(e)) *p = {randf(50, 190), 250, randf(0.6f, 1.4f), randf(14, 30), 1, true};
-  for (auto& p : parts[e]) {
-    if (!p.on) continue;
-    p.y -= p.v * 1.6f;
-    if (p.y < -30) p.on = false;
-    else heart(s, p.x + 6 * sinf(p.y / 14), p.y, p.size, hex(0x8a3858));
-  }
-  heart(s, CX, CY + 8, 172 * beat, hex(0x4a0a22));  // halo
-  heart(s, CX, CY + 8, 150 * beat, hex(0xff2d6f));
-  s.fillSmoothCircle(CX - 30, CY - 22, 12 * beat, hex(0xff9ab9));
-}
 
 void clock(Sprite& s, int e, uint32_t now) {
   s.fillScreen(hex(0x05070c));
@@ -347,7 +322,6 @@ void draw(int e, Sprite& s, Scene scene, const SceneInfo& info, uint32_t now, ui
   }
   const uint32_t t = now - start;
   switch (scene) {
-    case Scene::Hearts: hearts(s, e, t); break;
     case Scene::Clock: clock(s, e, now); break;
     case Scene::Weather: weather(s, e, t, info); break;
     case Scene::Music: music(s, e, t); break;

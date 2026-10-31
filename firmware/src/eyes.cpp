@@ -16,7 +16,6 @@ constexpr int W = 240, H = 240, CX = 120, CY = 120;
 constexpr int VISIBLE_R2 = 121 * 121;  // hors de ce cercle l'écran rond n'affiche rien
 constexpr int IRIS_R = 62, IRIS_D = IRIS_R * 2;
 constexpr int ANG = 256, RINGS = 64;    // texture d'iris en coordonnées polaires
-constexpr int SCLERA_W = 320, SCLERA_PAD = (SCLERA_W - W) / 2;
 constexpr int STRIP_H = 24;             // bandes rendues puis envoyées en DMA
 constexpr int LID_CLOSE_Y = 132;        // ligne où les paupières se rejoignent
 constexpr float UPPER_OPEN_H = 120.f, LOWER_OPEN_H = 110.f;
@@ -94,20 +93,12 @@ inline uint16_t blend565(uint16_t a, uint16_t b, uint32_t alpha) {
   return (uint16_t)(x | (x >> 16));
 }
 
-constexpr uint16_t PUPIL = rgb(4, 5, 9);
-// Paupières noir mat : elles se fondent dans le bord de l'écran, l'œil semble flotter.
-// Le style « gardien » les teinte de rouge sombre.
-uint16_t LID = rgb(16, 15, 20);
-uint16_t RIM_UPPER = rgb(84, 80, 98);   // liseré qui accroche la lumière
-uint16_t RIM_LOWER = rgb(58, 55, 68);
-constexpr uint16_t SPECULAR = rgb(255, 255, 255);
-
 struct Palette {
   float inner[3], mid[3], outer[3], limbus[3];
 };
 
 const Palette PALETTES[] = {
-    {},                                                               // Opal : buildOpalIris()
+    {},                                                               // Opal : buildClassicTex()
     {{205, 150, 65}, {115, 128, 70}, {72, 96, 60}, {22, 28, 22}},     // Hazel
     {{175, 195, 205}, {90, 140, 190}, {52, 92, 148}, {18, 28, 48}},   // Blue
     {{150, 95, 45}, {108, 66, 32}, {76, 46, 24}, {24, 14, 10}},       // Brown
@@ -117,20 +108,14 @@ const Palette PALETTES[] = {
 // ---------------------------------------------------------------------------
 // Textures précalculées au démarrage
 // ---------------------------------------------------------------------------
-uint16_t* sclera;   // SCLERA_W² en PSRAM, glisse avec le regard (le globe tourne)
 uint16_t* irisTex;  // [angle][anneau]
 uint16_t* polar;    // pour chaque pixel autour de l'iris : (distance*2) << 8 | angle
-uint8_t shadeLut[(2 * 121 * 121 >> 5) + 1];  // ombrage sphérique selon r², 0..64 (tramé)
 uint8_t spanHalf[H];  // demi-largeur visible de chaque ligne de l'écran rond
 float lidCurve[W];
 uint16_t* strip[2][2];
 
-// Style « gardien » : objectif rouge sans pupille, cœur incandescent, qui pulse.
 volatile Style style = Style::Opal;
-uint16_t guardRing[RINGS];  // couleur selon la distance au centre (l'objectif est radial)
-constexpr uint16_t GUARD_CORE = rgb(255, 240, 200);
-constexpr uint16_t GUARD_SCLERA = rgb(4, 2, 3);
-int guardPulse = 32, guardCore = 20;
+IrisColor irisColor = IrisColor::Opal;
 
 // Animations plein écran : un sprite 240×240 par œil (PSRAM).
 lgfx::LGFX_Sprite sprite[2];
@@ -218,131 +203,15 @@ void buildIris(const Palette& pal) {
   }
 }
 
-// Iris opale : fond bleu nuit traversé de plaques irisées (« jeu de couleurs » de
-// l'opale) qui passent du bleu au turquoise, au vert et au violet, avec des éclats dorés.
-void buildOpalIris() {
-  static const float FIRE[][3] = {
-      {40, 90, 230}, {30, 200, 225}, {70, 225, 130}, {165, 90, 235}, {40, 90, 230},
-  };
-  const float body[3] = {18, 36, 92}, gold[3] = {255, 190, 80};
-  const float collarCol[3] = {175, 215, 240}, limbus[3] = {6, 10, 28}, ruff[3] = {20, 18, 40};
-
-  float fiber[ANG], raw[ANG], collar[ANG];
-  for (int a = 0; a < ANG; a++) raw[a] = rnd();
-  float pc = rnd() * 6;
-  for (int a = 0; a < ANG; a++) {
-    fiber[a] = 0.5f * raw[a] + 0.25f * (raw[(a + ANG - 1) % ANG] + raw[(a + 1) % ANG]);
-    collar[a] = 0.30f + 0.03f * sinf(a * 2 * PI / ANG * 9 + pc) + 0.02f * (rnd() - 0.5f);
-  }
-  // Deux champs d'ondes 2D : l'un choisit la teinte, l'autre l'éclat des plaques.
-  float wave[6][3];
-  for (auto& w : wave) w[0] = 4 + rnd() * 8, w[1] = rnd() * 2 * PI, w[2] = rnd() * 6;
-
-  for (int r = 0; r < RINGS; r++) {
-    float t = (r + 0.5f) / RINGS;
-    for (int a = 0; a < ANG; a++) {
-      float th = a * 2 * PI / ANG;
-      float X = t * cosf(th), Y = t * sinf(th);
-      float hue = 0, fire = 0;
-      for (int i = 0; i < 3; i++) {
-        hue += sinf(wave[i][0] * (X * cosf(wave[i][1]) + Y * sinf(wave[i][1])) + wave[i][2]);
-        fire += sinf(wave[i + 3][0] * (X * cosf(wave[i + 3][1]) + Y * sinf(wave[i + 3][1]))
-                     + wave[i + 3][2]);
-      }
-      hue = hue / 6 + 0.5f + t * 0.35f;  // dérive de teinte avec le rayon
-      hue -= floorf(hue);
-      fire = smoothstep(-0.2f, 1.6f, fire);
-
-      float pos = hue * 4;
-      int i0 = min(3, (int)pos);
-      float fc[3];
-      lerp3(FIRE[i0], FIRE[i0 + 1], pos - i0, fc);
-      float col[3];
-      lerp3(body, fc, 0.4f + 0.6f * fire, col);
-      if (fire > 0.92f) lerp3(col, gold, (fire - 0.92f) * 6, col);  // rares éclats dorés
-
-      if (t < collar[a]) {  // collerette argentée autour de la pupille
-        float k = t / collar[a];
-        float tint[3], inner[3];
-        lerp3(col, collarCol, 0.5f, tint);
-        lerp3(ruff, tint, smoothstep(0.f, 0.4f, k), inner);
-        lerp3(inner, col, smoothstep(0.55f, 1.f, k), col);
-      }
-      if (t > 0.84f) lerp3(col, limbus, smoothstep(0.84f, 1.f, t), col);
-
-      int aw = (a + (int)(3 * sinf(t * 12 + a * 0.05f)) + ANG) & (ANG - 1);
-      float b = 0.72f + 0.5f * fiber[aw];
-      b += (1 - b) * smoothstep(0.84f, 1.f, t) * 0.7f;
-      irisTex[a * RINGS + r] = rgbf(col[0] * b, col[1] * b, col[2] * b);
-    }
-  }
-}
-
-void buildGuardRing() {
-  const float white[3] = {255, 250, 210}, core[3] = {255, 190, 40}, red[3] = {230, 20, 20};
-  const float edge[3] = {40, 0, 2}, ring[3] = {90, 92, 100};
-  for (int r = 0; r < RINGS; r++) {
-    const float t = (r + 0.5f) / RINGS;
-    float col[3];
-    if (t < 0.18f) lerp3(white, core, t / 0.18f, col);
-    else if (t < 0.55f) lerp3(core, red, (t - 0.18f) / 0.37f, col);
-    else lerp3(red, edge, smoothstep(0.55f, 1.f, t), col);
-    const float k = expf(-powf((t - 0.92f) / 0.025f, 2)) * 0.8f;  // bague métallique
-    lerp3(col, ring, k, col);
-    guardRing[r] = rgbf(col[0], col[1], col[2]);
-  }
-}
+void buildClassicTex();
 
 void buildIrisFor(IrisColor color) {
-  if (color == IrisColor::Opal) buildOpalIris();
+  irisColor = color;
+  if (color == IrisColor::Opal) buildClassicTex();
   else buildIris(PALETTES[(int)color]);
 }
 
-void plotVein(float x, float y, float dir, float len, float alpha, int depth) {
-  for (int s = 0; s < (int)len; s++) {
-    x += cosf(dir);
-    y += sinf(dir);
-    dir += (rnd() - 0.5f) * 0.35f;
-    float a = alpha * (1 - s / len);
-    int thick = s < len * 0.3f && depth == 0 ? 2 : 1;
-    for (int oy = 0; oy < thick; oy++) {
-      for (int ox = 0; ox < thick; ox++) {
-        int px = (int)x + ox, py = (int)y + oy;
-        if (px < 0 || py < 0 || px >= SCLERA_W || py >= SCLERA_W) continue;
-        uint16_t& c = sclera[py * SCLERA_W + px];
-        c = blend565(c, rgb(190, 70, 80), (uint32_t)(a * 32));
-      }
-    }
-    if (depth < 2 && rnd() < 0.025f) {
-      plotVein(x, y, dir + (rnd() < 0.5f ? 0.6f : -0.6f), (len - s) * 0.6f, a * 0.8f, depth + 1);
-    }
-  }
-}
-
-void buildSclera() {
-  const float white[3] = {238, 240, 244}, pink[3] = {214, 200, 208};  // blanc légèrement froid
-  const float half = SCLERA_W / 2.f;
-  for (int y = 0; y < SCLERA_W; y++) {
-    for (int x = 0; x < SCLERA_W; x++) {
-      float fx = (x - half) / half, fy = (y - half) / half;
-      float col[3];
-      lerp3(white, pink, smoothstep(0.35f, 1.f, sqrtf(fx * fx + fy * fy)), col);
-      float n = (rnd() - 0.5f) * 5;
-      sclera[y * SCLERA_W + x] = rgbf(col[0] + n, col[1] + n, col[2] + n);
-    }
-  }
-  for (int v = 0; v < 10; v++) {  // veines discrètes, seulement vers les coins
-    float a = rnd() * 2 * PI;
-    float x = half + cosf(a) * 165, y = half + sinf(a) * 165;
-    plotVein(x, y, a + PI + (rnd() - 0.5f) * 0.8f, 50 + rnd() * 60, 0.18f + rnd() * 0.14f, 0);
-  }
-}
-
 void buildShade() {
-  for (size_t i = 0; i < sizeof(shadeLut); i++) {
-    float r = sqrtf((float)(i << 5)) / 120.f;
-    shadeLut[i] = (uint8_t)constrain(64 * (1 - 0.38f * powf(r, 2.5f)), 16.f, 64.f);
-  }
   for (int y = 0; y < H; y++) {
     int dy = y - CY;
     spanHalf[y] = (uint8_t)min(CX, (int)sqrtf(max(0, VISIBLE_R2 - dy * dy)));
@@ -392,13 +261,135 @@ struct {
 } anim;
 
 struct EyeFrame {
-  int icx, icy, sx, sy;
+  int icx, icy;
   int fx, fy;                  // aplatissement de l'iris (8.8) quand l'œil tourne
   int irisHalfW, irisHalfH;    // étendue de l'iris à l'écran
   int pupil2, ringScale;
+  float dotX, dotY;            // Gardien : point de lumière qui fait le tour de l'anneau
   int16_t upper[W], lower[W];  // bords des paupières en 1/16 de pixel
 };
 EyeFrame frame[2];
+
+// ---------------------------------------------------------------------------
+// Yeux « épurés » (validés sur l'aperçu web) : fond noir, paupières noires sans liseré.
+//  - Opale (classique) : grand iris en verre opale, reflets irisés, pupille nette ;
+//    la palette suit l'humeur (texture d'iris reconstruite pendant la transition).
+//  - Gardien : sphère de verre lumineuse, anneau fin et un point de lumière.
+// ---------------------------------------------------------------------------
+constexpr uint16_t PRO_BG = rgb(6, 6, 12), PRO_LID = rgb(4, 4, 8), PRO_PUPIL = rgb(3, 3, 7);
+constexpr uint16_t GUARD_BG = rgb(7, 4, 10), WHITE = rgb(255, 255, 255);
+constexpr int HALO_N = (2 * 240 * 240 >> 5) + 1;  // halo indexé par r² / 32
+constexpr float GUARD_RING_R = IRIS_R * 1.48f;
+
+struct ClassicPalette {
+  float inner[3], mid[3], outer[3];
+};
+// Même ordre que Mood : neutre, content, triste, fâché, surpris, endormi.
+const ClassicPalette CLASSIC_PAL[] = {
+    {{126, 226, 240}, {58, 122, 236}, {104, 78, 214}},
+    {{150, 240, 214}, {70, 150, 236}, {120, 96, 220}},
+    {{96, 160, 230}, {36, 70, 190}, {52, 44, 150}},
+    {{255, 140, 200}, {190, 60, 200}, {110, 30, 150}},
+    {{170, 240, 250}, {80, 150, 246}, {120, 100, 230}},
+    {{100, 170, 190}, {50, 90, 170}, {70, 60, 150}},
+};
+volatile int moodIndex = 0;
+ClassicPalette classic = CLASSIC_PAL[0];  // palette affichée (glisse vers celle de l'humeur)
+uint8_t* playF;          // [angle][anneau] : jeu de couleurs de l'opale (0..255), précalculé
+int8_t fiberF[ANG];      // fines stries selon l'angle (-127..127)
+uint8_t volC[IRIS_D];    // Opale : volume (ombre douce) selon la distance, 0..255
+uint8_t haloC[HALO_N], haloG[HALO_N];  // halo autour de l'œil selon r², 0..32
+uint8_t dotA[81];        // Gardien : point de lumière selon d², 0..32
+uint8_t glassA[64];      // Gardien : reflet de verre selon la distance elliptique (×64), 0..32
+constexpr int WIN_X = -21, WIN_Y = -24;  // Opale : reflet « fenêtre » (haut gauche)
+constexpr int SPOT_X = 19, SPOT_Y = 21;  // Opale : petit point (bas droite)
+constexpr int RING_R2 = (int)(GUARD_RING_R * GUARD_RING_R);
+constexpr int RING_W = (int)(2 * GUARD_RING_R * 1.1f);  // ±1,1 px exprimés en r²
+constexpr int TICK_IN = (int)GUARD_RING_R + 3, TICK_OUT = (int)GUARD_RING_R + 9;
+constexpr uint16_t GUARD_LID = rgb(4, 2, 5);
+uint16_t guardLut[IRIS_D];  // couleur de la sphère selon la distance (reconstruite à chaque image)
+uint16_t haloColor = rgb(58, 122, 236);
+uint16_t guardPeach = rgb(255, 201, 181);
+float alert = 0;            // Gardien : 0 rose, 1 rouge (fâché)
+
+float smoothEdge(float dist, float width) { return constrain(1 - fabsf(dist) / width, 0.f, 1.f); }
+
+// Tables fixes : stries, jeu de couleurs, volume, halos (calculées une fois au démarrage).
+void buildProTables() {
+  for (int a = 0; a < ANG; a++) {
+    const float ang = a * 2 * PI / ANG - PI;
+    fiberF[a] = (int8_t)(127 * sinf(ang * 96 + sinf(ang * 7) * 2));
+    for (int r = 0; r < RINGS; r++) {
+      const float u = (r + 0.5f) / RINGS;
+      playF[a * RINGS + r] = (uint8_t)(255 * (0.5f + 0.5f * sinf(ang * 3 + u * 4)));
+    }
+  }
+  for (int d2 = 0; d2 < IRIS_D; d2++) {
+    const float t = (float)d2 / IRIS_D;
+    volC[d2] = (uint8_t)(255 * smoothstep(0.2f, 0.95f, t));
+  }
+  for (int i = 0; i < 81; i++) dotA[i] = (uint8_t)(32 * powf(1 - sqrtf((float)i) / 9, 2.2f));
+  for (int i = 0; i < 64; i++) glassA[i] = (uint8_t)(32 * 0.55f * powf(1 - sqrtf(i / 64.f), 1.5f));
+  for (int i = 0; i < HALO_N; i++) {
+    const float out = max(0.f, sqrtf((float)(i << 5)) - IRIS_R);
+    haloC[i] = (uint8_t)(32 * 0.10f * expf(-powf(out / 40.f, 1.6f)) + 0.5f);
+    haloG[i] = (uint8_t)(32 * 0.16f * expf(-powf(out / 46.f, 1.6f)) + 0.5f);
+  }
+}
+
+// Texture de l'iris « Opale » pour la palette actuelle : dégradé centre → milieu → bord,
+// jeu de couleurs, stries, collerette lumineuse et bord bleu nuit.
+void buildClassicTex() {
+  const float limbus[3] = {8, 12, 34};
+  float play[3], bright[3];
+  for (int i = 0; i < 3; i++) {
+    play[i] = (classic.inner[i] + classic.outer[i]) / 2;
+    bright[i] = min(255.f, classic.inner[i] * 1.15f);
+  }
+  for (int r = 0; r < RINGS; r++) {
+    const float u = (r + 0.5f) / RINGS;
+    float base[3];
+    if (u < 0.45f) lerp3(classic.inner, classic.mid, smoothstep(0, 0.45f, u), base);
+    else lerp3(classic.mid, classic.outer, smoothstep(0.45f, 0.9f, u), base);
+    const float playK = 0.22f * smoothstep(0.1f, 0.5f, u) / 255.f;
+    const float collar = smoothEdge(u - 0.1f, 0.06f) * 0.35f;
+    const float limb = smoothstep(0.84f, 1.f, u) * 0.92f;
+    const float fiberAmp = 0.08f * (1 - u * 0.6f) / 127.f;
+    for (int a = 0; a < ANG; a++) {
+      float col[3];
+      lerp3(base, play, playK * playF[a * RINGS + r], col);
+      const float fiber = 1 + fiberAmp * fiberF[a];
+      for (int i = 0; i < 3; i++) col[i] *= fiber;
+      lerp3(col, bright, collar, col);
+      lerp3(col, limbus, limb, col);
+      irisTex[a * RINGS + r] = rgbf(col[0], col[1], col[2]);
+    }
+  }
+}
+
+// Sphère du Gardien selon la distance : blanc chaud → pêche → rose → bordeaux, liseré fin.
+// Reconstruite à chaque image (64 octets de calcul) : le cœur respire, le rouge monte si fâché.
+void buildGuardLut(float breathe) {
+  const float rose0[3] = {255, 107, 143}, rose1[3] = {255, 54, 64};
+  const float wine0[3] = {58, 10, 30}, wine1[3] = {46, 4, 8};
+  const float peach0[3] = {255, 201, 181}, peach1[3] = {255, 150, 120};
+  const float white[3] = {255, 246, 240}, rim[3] = {255, 214, 226};
+  float rose[3], wine[3], peach[3];
+  lerp3(rose0, rose1, alert, rose);
+  lerp3(wine0, wine1, alert, wine);
+  lerp3(peach0, peach1, alert, peach);
+  for (int d2 = 0; d2 < IRIS_D; d2++) {
+    const float t = (float)d2 / IRIS_D;
+    float s[3];
+    if (t < 0.22f) lerp3(white, peach, smoothstep(0.06f + 0.06f * breathe, 0.22f, t), s);
+    else if (t < 0.62f) lerp3(peach, rose, smoothstep(0.22f, 0.62f, t), s);
+    else lerp3(rose, wine, smoothstep(0.62f, 0.95f, t), s);
+    lerp3(s, rim, smoothEdge(t - 0.975f, 0.03f) * 0.95f, s);
+    guardLut[d2] = rgbf(s[0], s[1], s[2]);
+  }
+  haloColor = rgbf(rose[0], rose[1], rose[2]);
+  guardPeach = rgbf(peach[0], peach[1], peach[2]);
+}
 
 // ---------------------------------------------------------------------------
 // Mode « appareil photo » : l'iris devient un objectif (diaphragme à 6 lamelles,
@@ -587,12 +578,31 @@ void animate() {
   anim.pupil += (pupilTarget - anim.pupil) * min(1.f, dt * 3);
 
   animateLens(now, dt);
-  const bool guard = style == Style::Guard;
-  LID = guard ? rgb(6, 2, 2) : rgb(16, 15, 20);
-  RIM_UPPER = guard ? rgb(120, 20, 20) : rgb(84, 80, 98);
-  RIM_LOWER = guard ? rgb(60, 10, 10) : rgb(58, 55, 68);
-  guardPulse = 24 + (int)(8 * sinf(now * 0.006f));
-  guardCore = 10 + (int)(constrain(anim.pupil, 0.f, 1.f) * 18);
+  const int mi = moodIndex;
+  alert += ((mi == (int)Mood::Angry ? 1.f : 0.f) - alert) * min(1.f, dt * 2.5f);  // fâché : vire au rouge
+  if (style == Style::Guard) {
+    buildGuardLut(0.5f + 0.5f * sinf(now * 0.0021f));  // le cœur respire
+  } else {
+    // Opale : la palette glisse vers celle de l'humeur ; texture refaite seulement pendant la transition.
+    if (irisColor == IrisColor::Opal) {
+      const ClassicPalette& want = CLASSIC_PAL[mi];
+      float* cur[3] = {classic.inner, classic.mid, classic.outer};
+      const float* tgt[3] = {want.inner, want.mid, want.outer};
+      const float k = min(1.f, dt * 3);
+      bool changed = false;
+      for (int j = 0; j < 3; j++) {
+        for (int i = 0; i < 3; i++) {
+          const float d = tgt[j][i] - cur[j][i];
+          if (d == 0) continue;
+          cur[j][i] = fabsf(d) < 1 ? tgt[j][i] : cur[j][i] + d * k;
+          changed = true;
+        }
+      }
+      if (changed) buildClassicTex();
+    }
+    haloColor = rgbf(classic.mid[0], classic.mid[1], classic.mid[2]);
+  }
+  const float dotAng = now * 0.00055f;
 
   if (sceneRequested) {
     sceneNow = sceneWanted;
@@ -619,14 +629,14 @@ void animate() {
     float gy = constrain(anim.gy * lookAhead, -1.f, 1.f);
     f.icx = CX + (int)lroundf(gx * GAZE_X_PX);
     f.icy = CY + (int)lroundf(gy * GAZE_Y_PX);
-    f.sx = SCLERA_PAD + (int)(gx * 30);
-    f.sy = SCLERA_PAD + (int)(gy * 26);
+    f.dotX = f.icx + cosf(dotAng + e * 0.6f) * GUARD_RING_R;
+    f.dotY = f.icy + sinf(dotAng + e * 0.6f) * GUARD_RING_R;
     // Un disque vu de biais s'aplatit : l'iris rétrécit dans le sens du regard.
     f.fx = (int)(256 / (1 - 0.22f * gx * gx));
     f.fy = (int)(256 / (1 - 0.22f * gy * gy));
     f.irisHalfW = IRIS_R * 256 / f.fx + 1;
     f.irisHalfH = IRIS_R * 256 / f.fy + 1;
-    int pr = 16 + (int)(constrain(anim.pupil, 0.f, 1.f) * 30);
+    int pr = 18 + (int)(constrain(anim.pupil, 0.f, 1.f) * 16);
     f.pupil2 = pr * 2;
     f.ringScale = (RINGS << 8) / (IRIS_D - f.pupil2);
 
@@ -655,17 +665,14 @@ void animate() {
 // ---------------------------------------------------------------------------
 // Rendu
 // ---------------------------------------------------------------------------
-inline uint16_t lidPixel(int depth, bool upper, uint32_t shade) {
-  // depth : pixels entiers entre la ligne et le bord de la paupière
-  if (depth == 0) return upper ? RIM_UPPER : RIM_LOWER;
-  if (depth < 3) return blend565(upper ? RIM_UPPER : RIM_LOWER, LID, depth * 12);
-  return scale565(LID, shade);
-}
-
 void renderStrip(int e, int y0, uint16_t* out) {
   const EyeFrame& f = frame[e];
-  const int hx1 = f.icx - 22, hy1 = f.icy - 24;  // reflets : lumière en haut à gauche
-  const int hx2 = f.icx + 16, hy2 = f.icy + 18;
+  const bool guard = style == Style::Guard;
+  const uint16_t bg = guard ? GUARD_BG : PRO_BG, lid = guard ? GUARD_LID : PRO_LID;
+  const uint8_t* halo = guard ? haloG : haloC;
+  const uint16_t haloCol = haloColor;
+  const int dotX = (int)lroundf(f.dotX), dotY = (int)lroundf(f.dotY);
+  const int lensAlpha = lens.alpha, flash = lens.flash, dim = dimLevel;
 
   for (int y = y0; y < y0 + STRIP_H; y++) {
     uint16_t* o = out + (y - y0) * W;
@@ -674,79 +681,82 @@ void renderStrip(int e, int y0, uint16_t* out) {
     memset(o, 0, x0 * sizeof(uint16_t));
     memset(o + x1, 0, (W - x1) * sizeof(uint16_t));
 
-    const int dy = y - CY, dy2 = dy * dy;
     const int y16 = y << 4;
-    const uint16_t* scleraRow = sclera + (y + f.sy) * SCLERA_W + f.sx;
-    const int ry = y - f.icy;
+    const int ry = y - f.icy, ry2 = ry * ry, ary = abs(ry);
     const uint16_t* polarRow = nullptr;
     if (ry > -f.irisHalfH && ry < f.irisHalfH) {
       const int iy = ((ry * f.fy) >> 8) + IRIS_R;
       if ((unsigned)iy < IRIS_D) polarRow = polar + iy * IRIS_D;
     }
     const int irisX0 = f.icx - f.irisHalfW, irisW = 2 * f.irisHalfW;
-    const int dh1 = y - hy1, dh2 = y - hy2;
-    const int dh1sq = dh1 * dh1, dh2sq = dh2 * dh2;
-    const uint32_t ditherRow = y & 1;
-    const int lensAlpha = lens.alpha, flash = lens.flash, dim = dimLevel;
-    const bool guard = style == Style::Guard;
+    const int dotDy = y - dotY, dotDy2 = dotDy * dotDy;
+    const bool dotRow = guard && dotDy2 < 81;
+    const bool tickRowH = guard && ary < 2;                          // repères gauche / droite
+    const bool tickRowV = guard && ary > TICK_IN && ary < TICK_OUT;  // repères haut / bas
+    const int gy = ry + 26, gy2 = gy * gy;                           // reflet de verre du Gardien
+    const int winY = abs(ry - WIN_Y), spotY = ry - SPOT_Y;
     const int recDy = y - REC_Y;
     const bool recRow = e == 1 && lens.rec && recDy * recDy < REC_R2;
 
     for (int x = x0; x < x1; x++) {
-      const int dx = x - CX;
-      // Ombrage sur 64 niveaux tramé en damier vers 32 : plus de bandes visibles.
-      const uint32_t shade = (shadeLut[(dx * dx + dy2) >> 5] + (ditherRow ^ (x & 1))) >> 1;
-      const int up = f.upper[x], lo = f.lower[x];
-      const int coverU = up - y16;         // > 0 : la paupière du haut couvre la ligne
-      const int coverL = y16 + 16 - lo;    // > 0 : la paupière du bas couvre la ligne
+      const int coverU = f.upper[x] - y16;       // > 0 : la paupière du haut couvre la ligne
+      const int coverL = y16 + 16 - f.lower[x];  // > 0 : la paupière du bas couvre la ligne
       uint16_t c;
-
-      if (coverU >= 16) {
-        c = lidPixel((coverU - 16) >> 4, true, shade);
-      } else if (coverL >= 16) {
-        c = lidPixel((coverL - 16) >> 4, false, shade);
+      if (coverU >= 16 || coverL >= 16) {
+        c = lid;  // paupière noire, sans liseré : l'écran « se ferme »
       } else {
-        bool inIris = false;
+        const int rx = x - f.icx, r2 = rx * rx + ry2;
+        c = blend565(bg, haloCol, halo[min(r2 >> 5, HALO_N - 1)]);  // halo discret
+        if (guard) {
+          const int rd = abs(r2 - RING_R2);  // anneau fin
+          if (rd < RING_W) c = blend565(c, haloCol, 13 * (RING_W - rd) / RING_W);
+          const int arx = abs(rx);
+          if ((tickRowH && arx > TICK_IN && arx < TICK_OUT) || (tickRowV && arx < 2))
+            c = blend565(c, guardPeach, 18);
+          if (dotRow) {  // point de lumière qui fait le tour de l'anneau
+            const int qx = x - dotX, dd = qx * qx + dotDy2;
+            if (dd < 81) c = blend565(c, WHITE, dotA[dd]);
+          }
+        }
         if (polarRow && (unsigned)(x - irisX0) < (unsigned)irisW) {
-          const int ix = (((x - f.icx) * f.fx) >> 8) + IRIS_R;
+          const int ix = ((rx * f.fx) >> 8) + IRIS_R;
           if ((unsigned)ix < IRIS_D) {
             const uint16_t p = polarRow[ix];
             const int d2 = p >> 8;
             if (d2 < IRIS_D) {
-              inIris = true;
-              if (guard) {
-                c = d2 < guardCore ? GUARD_CORE : scale565(guardRing[(d2 * RINGS) / IRIS_D], guardPulse);
-              } else if (d2 < f.pupil2) {
-                c = PUPIL;
+              uint16_t s;
+              if (guard) {  // sphère de verre : dégradé radial + reflet elliptique
+                s = guardLut[d2];
+                const int gx = rx + 22, gx2 = gx * gx;
+                if (gx2 < 441 && gy2 < 154) {
+                  const int q = gx2 * 64 / 441 + gy2 * 64 / 154;
+                  if (q < 64) s = blend565(s, WHITE, glassA[q]);
+                }
               } else {
-                const int ring = ((d2 - f.pupil2) * f.ringScale) >> 8;
-                c = irisTex[(p & 0xFF) * RINGS + ring];
+                if (d2 < f.pupil2) {
+                  s = PRO_PUPIL;
+                } else {
+                  s = irisTex[(p & 0xFF) * RINGS + (((d2 - f.pupil2) * f.ringScale) >> 8)];
+                  if (d2 < f.pupil2 + 3) s = blend565(PRO_PUPIL, s, (d2 - f.pupil2) * 10 + 2);
+                }
+                const int proj = (rx * 154 + ry * 205) >> 8;  // volume : ombre à l'opposé du reflet
+                if (proj > 0) {
+                  const int k = (min(proj * 32 / IRIS_R, 32) * volC[d2]) >> 8;
+                  s = scale565(s, 32 - ((k * 10) >> 5));
+                }
+                const int ax = abs(rx - WIN_X);  // reflet en forme de fenêtre
+                if (ax < 10 && winY < 8) s = blend565(s, WHITE, min(25, min(10 - ax, 8 - winY) * 17));
+                const int sx = rx - SPOT_X, sd = sx * sx + spotY * spotY;
+                if (sd < 10) s = blend565(s, WHITE, sd < 4 ? 19 : 10);
               }
-              if (lensAlpha) c = blend565(c, lensPixel(d2, p & 0xFF), lensAlpha);
+              if (lensAlpha) s = blend565(s, lensPixel(d2, p & 0xFF), lensAlpha);
+              c = d2 >= IRIS_D - 2 ? blend565(c, s, (IRIS_D - d2) * 11) : s;  // bord lissé
             }
           }
         }
-        if (!inIris) c = guard ? GUARD_SCLERA : scleraRow[x];
-        c = scale565(c, shade);
-
-        const int below = -coverU >> 4;  // ombre portée de la paupière supérieure
-        if (below < 14) c = scale565(c, 14 + max(below, 0) * 18 / 14);
-        const int above = -coverL >> 4;  // léger creux d'ombre au ras de la paupière inférieure
-        if (above < 3) c = scale565(c, 22 + max(above, 0) * 3);
-
-        if (inIris && !guard) {
-          if (dh1sq < 121) {
-            const int a = x - hx1, d = a * a + dh1sq;
-            if (d < 121) c = blend565(c, SPECULAR, d < 36 ? 28 : (121 - d) * 28 / 85);
-          }
-          if (dh2sq < 16) {
-            const int a = x - hx2;
-            if (a * a + dh2sq < 16) c = blend565(c, SPECULAR, 16);
-          }
-        }
         // Bords des paupières lissés au sous-pixel (mouvements fluides).
-        if (coverU > 0) c = blend565(c, RIM_UPPER, coverU * 2);
-        if (coverL > 0) c = blend565(c, RIM_LOWER, coverL * 2);
+        if (coverU > 0) c = blend565(c, lid, coverU * 2);
+        if (coverL > 0) c = blend565(c, lid, coverL * 2);
       }
       if (dim < 32) c = scale565(c, dim);
       if (flash) c = blend565(c, FLASH, flash);
@@ -814,12 +824,12 @@ void eyeTask(void* arg) {
 
 void begin(IrisColor color) {
   if (polar) return;
-  sclera = (uint16_t*)heap_caps_malloc(SCLERA_W * SCLERA_W * 2, MALLOC_CAP_SPIRAM);
+  playF = (uint8_t*)heap_caps_malloc(ANG * RINGS, MALLOC_CAP_SPIRAM);
   irisTex = (uint16_t*)heap_caps_malloc(ANG * RINGS * 2, MALLOC_CAP_8BIT);
   polar = (uint16_t*)heap_caps_malloc(IRIS_D * IRIS_D * 2, MALLOC_CAP_8BIT);
   for (auto& eye : strip)
     for (auto& s : eye) s = (uint16_t*)heap_caps_malloc(W * STRIP_H * 2, MALLOC_CAP_DMA);
-  if (!sclera || !irisTex || !polar || !strip[1][1]) {
+  if (!playF || !irisTex || !polar || !strip[1][1]) {
     Serial.println("eyes: mémoire insuffisante");
     polar = nullptr;
     return;
@@ -829,9 +839,8 @@ void begin(IrisColor color) {
   buildShade();
   buildHexScale();
   buildPolar();
+  buildProTables();
   buildIrisFor(color);
-  buildGuardRing();
-  buildSclera();
   for (auto& s : sprite) {  // animations : un écran complet par œil, en PSRAM
     s.setPsram(true);
     s.setColorDepth(16);
@@ -853,7 +862,10 @@ void begin(IrisColor color) {
   xTaskCreatePinnedToCore(eyeTask, "eye_right", 4096, (void*)1, 1, nullptr, 1);
 }
 
-void setMood(Mood mood) { anim.target = MOODS[(int)mood]; }
+void setMood(Mood mood) {
+  anim.target = MOODS[(int)mood];
+  moodIndex = (int)mood;
+}
 
 void lookAt(float x, float y) {
   anim.autoGaze = false;

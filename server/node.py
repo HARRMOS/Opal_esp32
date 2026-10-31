@@ -167,7 +167,7 @@ HEAD_TOOL = {
 }
 
 # Animations plein écran des deux écrans (voir firmware/src/scenes.cpp).
-SCENES = ["coeurs", "horloge", "meteo", "musique", "reflexion", "minuteur", "sommeil",
+SCENES = ["horloge", "meteo", "musique", "reflexion", "minuteur", "sommeil",
           "message", "etourdi", "matrix", "demarrage"]
 
 SCREEN_TOOL = {
@@ -176,11 +176,11 @@ SCREEN_TOOL = {
         "name": "opal_box_ecran",
         "description": (
             "Affiche une animation sur les deux écrans d'Opal Box à la place des yeux, ou change "
-            "le style des yeux. Animations : coeurs (affection, bravo), horloge (heure), meteo "
+            "le style des yeux. Animations : horloge (heure), meteo "
             "(météo réelle du jour), musique, reflexion, minuteur (compte à rebours de "
             "« minutes », ex. pomodoro), sommeil, message (« nombre » de messages, « texte » "
             "sous le nombre), etourdi, matrix, demarrage. « yeux » revient aux yeux. Style : "
-            "opale (yeux normaux) ou gardien (objectif rouge qui surveille)."
+            "opale (iris opale, la teinte suit l'humeur) ou gardien (sphère lumineuse qui surveille)."
         ),
         "parameters": {
             "type": "object",

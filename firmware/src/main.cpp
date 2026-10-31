@@ -209,12 +209,12 @@ static bool sendWakeOnLan(const char* mac) {
 // {"type":"scene","name":"horloge","ms":10000, + données : temp, min, max, icon, desc,
 //  place (météo) ; minutes, label (minuteur) ; count, label (message)}. "aucune" = les yeux.
 static void applySceneCommand(JsonDocument& doc) {
-  static const char* const NAMES[] = {"aucune", "coeurs", "horloge", "meteo", "musique",
+  static const char* const NAMES[] = {"aucune", "horloge", "meteo", "musique",
                                       "reflexion", "minuteur", "sommeil", "message",
                                       "etourdi", "matrix", "demarrage"};
   const char* name = doc["name"] | "aucune";
   int index = -1;
-  for (int i = 0; i < 12; i++)
+  for (int i = 0; i < (int)(sizeof(NAMES) / sizeof(*NAMES)); i++)
     if (strcmp(name, NAMES[i]) == 0) index = i;
   if (index <= 0) {
     eyes::endScene();
@@ -460,7 +460,7 @@ void loop() {
     Serial.printf("yeux : %.1f fps\n", eyes::fps());
   }
   // Mise au point : une ligne JSON reçue sur le port USB est traitée comme un message du pont
-  // (ex. {"type":"scene","name":"coeurs","ms":5000}).
+  // (ex. {"type":"scene","name":"horloge","ms":5000}).
   static String serialLine;
   while (Serial.available()) {
     const char ch = Serial.read();
