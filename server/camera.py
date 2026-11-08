@@ -225,10 +225,29 @@ class CameraHub:
         self._last_score: float | None = None
         self.seen: dict[str, Any] = {}  # dernières détections, pour la page du direct
         self._arrivals: deque[float] = deque(maxlen=40)  # heures d'arrivée des images
+        self.private = False  # mode privé : les images sont jetées sans être regardées
 
     @property
     def online(self) -> bool:
         return self.ws is not None
+
+    @property
+    def looking(self) -> bool:
+        """Un visage tourné vers Opal, vu il y a moins d'une seconde."""
+        face = self.seen.get("face") or {}
+        return bool(face.get("facing")) and time.time() - face.get("at", 0) < 1.0
+
+    async def set_private(self, on: bool) -> None:
+        """Mode privé : plus d'analyse, plus de direct, plus de photo ; la présence retombe."""
+        self.private = on
+        if on:
+            self.frame = None
+            self._enhanced = None
+            self.seen.clear()
+            self._hits.clear()
+            self._votes.clear()
+            if self.present:
+                await self._set_present(False)
 
     @property
     def votes(self) -> tuple[str, ...]:
@@ -407,6 +426,8 @@ class CameraHub:
         if len(data) < 2 or (ws is not None and ws is not self.ws):
             return  # source en retrait (une autre caméra a pris la main)
         kind, jpeg = data[0], data[1:]
+        if self.private:
+            return
         if kind == SNAPSHOT:
             if self._snapshot and not self._snapshot.done():
                 self._snapshot.set_result(jpeg)
@@ -546,7 +567,7 @@ class CameraHub:
 
     def note_device_objects(self, ws: Any, items: Any) -> None:
         """Objets détectés par l'appareil qui filme (page « envoyer ») : vérifiés puis gardés."""
-        if ws is not self.ws or not isinstance(items, list):
+        if ws is not self.ws or not isinstance(items, list) or self.private:
             return
         clean = []
         for item in items[:30]:
@@ -588,6 +609,8 @@ class CameraHub:
         """
         if self.ws is None:
             raise RuntimeError("La caméra d'Opal Box n'est pas connectée.")
+        if self.private:
+            raise RuntimeError("Opal Box est en mode privé : pas de photo.")
         if self._snapshot is None or self._snapshot.done():
             self._snapshot = asyncio.get_running_loop().create_future()
             await self._send({"type": "snapshot", "flash": bool(flash)})

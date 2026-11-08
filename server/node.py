@@ -218,8 +218,34 @@ LOCK_TOOL = {
     },
 }
 
+LISTEN_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "opal_box_ecoute",
+        "description": (
+            "Règle quand Opal Box t'écoute sans bouton, ou active le mode privé (ni micro ni caméra, "
+            "seul le bouton marche). Sans argument : dit le réglage actuel."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["bouton", "presence", "connu", "regard", "mot"],
+                    "description": (
+                        "bouton = seulement le bouton ; presence = dès que quelqu'un est là ; "
+                        "connu = un visage connu ; regard = un visage connu qui te regarde ; "
+                        "mot = quand on dit « Opal »."
+                    ),
+                },
+                "prive": {"type": "boolean", "description": "true = mode privé, false = le quitter."},
+            },
+        },
+    },
+}
+
 TOOLS = [EYES_TOOL, PHOTO_TOOL, PRESENCE_TOOL, LEARN_FACE_TOOL, FORGET_FACE_TOOL, HEAD_TOOL,
-         SCREEN_TOOL, LOCK_TOOL]
+         SCREEN_TOOL, LOCK_TOOL, LISTEN_TOOL]
 
 ENVIRONMENT = (
     "## OPAL BOX\n"

@@ -50,6 +50,13 @@ static uint32_t gazeUntil = 0;
 static volatile uint32_t spkRate = SPK_DEFAULT_RATE;
 static bool recording = false;
 static uint32_t recordStart = 0;
+// Écoute sans bouton (message « listen » du pont) : micro en continu, le pont découpe les
+// phrases. Jamais pendant que le haut-parleur joue (sinon Opal s'entend), ni en mode privé.
+static bool handsFree = false;
+static bool privateMode = false;
+static bool nightSleep = false;
+static volatile uint32_t spkLastMs = 0;  // dernier son joué
+#define ECHO_GUARD_MS 400
 static int32_t micRaw[MIC_CHUNK_SAMPLES];
 static int16_t micPcm[MIC_CHUNK_SAMPLES];
 
@@ -158,6 +165,7 @@ static void speakerTask(void*) {
     for (size_t i = 0; i < n; i++) data[i] = (int32_t)data[i] * SPK_VOLUME / 100;
     spk.write((uint8_t*)data, n * 2);
     vRingbufferReturnItem(spkBuffer, data);
+    spkLastMs = millis();
   }
 }
 
@@ -282,12 +290,22 @@ static void onText(const uint8_t* payload, size_t length) {
   } else if (strcmp(type, "scene") == 0) {  // animation plein écran
     applySceneCommand(doc);
   } else if (strcmp(type, "sleep") == 0) {  // la nuit, sans personne devant la caméra
-    const bool asleep = doc["on"] | false;
+    nightSleep = doc["on"] | false;
+    const bool asleep = nightSleep || privateMode;
     eyes::setAsleep(asleep);
     if (asleep) eyes::showScene(eyes::Scene::Sleep, 0);
     else if (eyes::scene() == eyes::Scene::Sleep) eyes::endScene();
     if (asleep) head::center();  // la tête revient doucement au centre pour dormir
     else head::setIdle(true);
+  } else if (strcmp(type, "listen") == 0) {  // écoute sans bouton ouverte / fermée
+    handsFree = doc["on"] | false;
+    if (handsFree && !eyesHeld) eyes::setPupil(0.85);  // pupilles qui s'ouvrent : j'écoute
+    else if (!eyesHeld) eyes::setPupil(-1);
+  } else if (strcmp(type, "privacy") == 0) {  // mode privé : paupières closes, micro coupé
+    privateMode = doc["on"] | false;
+    if (privateMode) handsFree = false;
+    eyes::setAsleep(privateMode || nightSleep);
+    if (!privateMode && !nightSleep) eyes::blink();
   } else if (strcmp(type, "recording") == 0) {  // quelqu'un regarde le direct
     eyes::setRecording(doc["on"] | false);
   } else if (strcmp(type, "presence") == 0) {
@@ -472,5 +490,8 @@ void loop() {
     }
   }
   if (recording) streamMic();
+  else if (handsFree && !privateMode && state != State::Speaking &&
+           millis() - spkLastMs > ECHO_GUARD_MS)
+    streamMic();
   else delay(2);
 }

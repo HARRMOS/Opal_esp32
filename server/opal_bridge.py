@@ -30,6 +30,11 @@ Protocole du boîtier (yeux + son) :
     texte  {"type": "eyes", "mood"?, "look"?: [x, y] | "auto", "blink"?, "wink"?, "pupil"?, "hold_ms"}
     texte  {"type": "gaze", "x", "y"}     visage vu par la caméra (-1..1, vu de face)
     texte  {"type": "presence", "present": bool}
+    texte  {"type": "listen", "on": bool}   écoute sans bouton : micro en continu (opening.py)
+    texte  {"type": "privacy", "on": bool}  mode privé : ni micro ni caméra, seul le bouton
+
+  En écoute sans bouton, l'ESP32 envoie le micro en continu (hors lecture de la voix) ;
+  le pont découpe les phrases au volume.
 
 Protocole de la caméra : voir camera.py ({"type": "hello", "device": "camera"}).
 
@@ -44,6 +49,7 @@ Variables d'environnement :
     OPAL_GREET / OPAL_GREET_COOLDOWN_S   salutation à l'arrivée (défaut 1 / 3600 s)
     OPAL_CAM_MIRROR     1 si l'image de la caméra est déjà en miroir
     OPAL_STT_MODEL      modèle faster-whisper (défaut small)
+    OPAL_OPEN_MODE      écoute sans bouton : bouton|presence|connu|regard|mot (défaut regard)
     OPAL_TTS_VOICE / OPAL_TTS_RATE / OPAL_TTS_PITCH   voix Edge
 """
 
@@ -80,6 +86,7 @@ from camera import CameraHub
 from rhythm import DayRhythm
 from logs import log
 from node import SCENES, OpalNode, eyes_command
+from opening import MODE_TEXT, Endpointer, Inputs, Opening
 from voice import MIC_RATE, TTS_RATE, Speaker, Transcriber
 from web import make_app
 
@@ -144,6 +151,16 @@ OWNER_GRACE_S = 20.0
 PC_MACS = [m.strip() for m in os.environ.get("OPAL_PC_MACS", "").split(",") if m.strip()]
 WAKE_RECIPE = os.environ.get("OPAL_WAKE_RECIPE", "Opal réveil écran")
 WAKE_COOLDOWN_S = float(os.environ.get("OPAL_WAKE_COOLDOWN_S", "600"))
+
+# Écoute sans bouton (voir opening.py) : OPAL_OPEN_MODE = bouton|presence|connu|regard|mot.
+OPEN_MODE = os.environ.get("OPAL_OPEN_MODE", "regard")
+OPENING_TICK_S = 0.25
+# Mode privé à la voix (marche au bouton, même en mode privé).
+_PRIVATE_ON = re.compile(r"\b(mode priv[ée]|arr[êe]te de m'?(?:[ée]couter|regarder)|ne m'?[ée]coute plus)\b", re.I)
+_PRIVATE_OFF = re.compile(
+    r"\b((?:sors|quitte|fin)\w* (?:du |le )?mode priv[ée]|tu peux (?:m'?[ée]couter|me regarder|regarder))\b", re.I)
+# Phrases que Whisper invente sur du bruit : ignorées quand on écoute sans bouton.
+_PHANTOM = re.compile(r"sous-titr|merci d'avoir regard|abonnez|amara\.org|^\W*(merci|musique)\W*$", re.I)
 
 _MARKDOWN = re.compile(r"```[\s\S]*?```|`([^`]*)`|\*\*([^*]+)\*\*|^#{1,6}\s+|^\s*[-•*]\s+", re.M)
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
@@ -296,6 +313,10 @@ class OpalBridge:
         self._unlock_after_absence = False
         self._stranger_since = 0.0
         self._comforted_at = -COMFORT_COOLDOWN_S
+        self.opening = Opening(OPEN_MODE)
+        self._listening = False  # écoute sans bouton ouverte (micro en continu)
+        self._busy = False       # Opal réfléchit ou parle : on n'écoute pas sa propre voix
+        self._spoke_at = 0.0
 
     def set_pending_confirmation(self, confirm_id: str | None) -> None:
         self.pending_confirmation = confirm_id
@@ -381,6 +402,16 @@ class OpalBridge:
             return True, (f"{n} PC verrouillé(s). Déverrouillage par son code, ou quand ta caméra "
                           "le reconnaît à son retour (s'il est devant toi maintenant, il doit "
                           "d'abord s'absenter).")
+        if tool == "opal_box_ecoute":
+            if (prive := args.get("prive")) is not None:
+                await self.set_private(bool(prive))
+            if (mode := args.get("mode")) and not self.opening.set_mode(str(mode)):
+                return False, f"Mode inconnu : {mode}."
+            if mode:
+                log("opening_mode", mode=self.opening.mode)
+            if self.opening.private:
+                return True, "Mode privé : je n'écoute et ne regarde plus, seul le bouton marche."
+            return True, f"J'écoute {MODE_TEXT[self.opening.mode]} (et toujours avec le bouton)."
         if tool == "opal_box_oublier_visage":
             name = str(args.get("nom") or "").strip()
             if self.cams.faces is None or not self.cams.faces.forget(name):
@@ -607,6 +638,42 @@ class OpalBridge:
         self._clock_on = self._clock_on and name == "horloge"
         return await self.send_to_devices({"type": "scene", "name": name, "ms": ms, **data})
 
+    async def set_private(self, on: bool) -> None:
+        if on == self.opening.private:
+            return
+        self.opening.private = on
+        await self.cams.set_private(on)
+        log("private", on=on)
+        await self.send_to_devices({"type": "privacy", "on": on})
+        if self.node is not None:
+            await self.node.send_event("mode_prive_active" if on else "mode_prive_quitte",
+                                       {"lieu": "Opal Box"})
+        await self._update_listening()
+
+    async def opening_loop(self) -> None:
+        """Ouvre ou ferme l'écoute sans bouton selon la présence, le visage et le regard."""
+        while True:
+            await asyncio.sleep(OPENING_TICK_S)
+            try:
+                await self._update_listening()
+            except Exception as exc:  # la boucle ne doit jamais mourir
+                log("opening_failed", error=repr(exc))
+
+    async def _update_listening(self) -> None:
+        state = Inputs(
+            present=self.cams.present,
+            identity=self.cams.identity,
+            knows_faces=bool(self.cams.faces and self.cams.faces.people),
+            looking=self.cams.looking,
+            busy=self._busy or self._saying or self._asleep or self._guarding,
+        )
+        listening, why = self.opening.is_open(state, time.monotonic())
+        if listening == self._listening:
+            return
+        self._listening = listening
+        log("listening", on=listening, why=why)
+        await self.send_to_devices({"type": "listen", "on": listening})
+
     async def update_sleep(self) -> None:
         """La nuit, sans personne devant la caméra ni activité récente : la boîte dort."""
         asleep = (
@@ -765,12 +832,20 @@ class OpalBridge:
             log("say_silent", kind=kind)
             return
         sentences = speech_script(answer)
-        heard = await self.cams.speak(self._tts, sentences, TTS_RATE)
-        log("say", kind=kind, heard_by=heard, text=answer[:200])
-        if not heard:
-            for ws in list(self._devices):
-                await self._speak(ws, answer)
-                await self._send(ws, type="state", value="idle")
+        self._busy = True
+        await self._update_listening()
+        try:
+            heard = await self.cams.speak(self._tts, sentences, TTS_RATE)
+            log("say", kind=kind, heard_by=heard, text=answer[:200])
+            if not heard:
+                played = 0.0
+                for ws in list(self._devices):
+                    played = max(played, await self._speak(ws, answer))
+                    await self._send(ws, type="state", value="idle")
+                await asyncio.sleep(max(0.0, played - (time.monotonic() - self._spoke_at)) + 0.4)
+        finally:
+            self._busy = False
+            self.opening.replied(time.monotonic())
 
     async def send_to_devices(self, payload: dict[str, object]) -> int:
         """Envoie un message à tous les boîtiers connectés ; retourne leur nombre."""
@@ -841,18 +916,31 @@ class OpalBridge:
             await self._send(ws, type="recording", on=True)
         if self._asleep:
             await self._send(ws, type="sleep", on=True)
+        if self.opening.private:
+            await self._send(ws, type="privacy", on=True)
+        if self._listening:
+            await self._send(ws, type="listen", on=True)
         audio = bytearray()
         recording = False
+        ep = Endpointer(MIC_RATE, MAX_UTTERANCE_S)
         try:
             async for message in ws:
                 if isinstance(message, bytes):
-                    if recording and len(audio) < MAX_UTTERANCE_S * MIC_RATE * 2:
-                        audio.extend(message)
+                    if recording:
+                        if len(audio) < MAX_UTTERANCE_S * MIC_RATE * 2:
+                            audio.extend(message)
+                    elif self._listening and not self._busy:
+                        if (phrase := ep.feed(message)) is not None:
+                            self.opening.heard(time.monotonic())
+                            asyncio.create_task(self._handle_utterance(ws, phrase, handsfree=True))
+                    else:
+                        ep.reset()  # micro de fin d'écoute ou voix d'Opal : on jette
                     continue
 
                 msg = json.loads(message)
                 kind = msg.get("type")
                 if kind == "start":
+                    ep.reset()
                     audio.clear()
                     recording = True
                     await self._send(ws, type="state", value="listening")
@@ -860,43 +948,74 @@ class OpalBridge:
                     recording = False
                     pcm = bytes(audio)
                     audio.clear()
-                    await self._handle_utterance(ws, pcm)
+                    asyncio.create_task(self._handle_utterance(ws, pcm))
         finally:
             self._devices.discard(ws)
             self._update_node()
 
-    async def _handle_utterance(self, ws: ServerConnection, pcm: bytes) -> None:
+    async def _handle_utterance(self, ws: ServerConnection, pcm: bytes, handsfree: bool = False) -> None:
         if len(pcm) < MIN_UTTERANCE_S * MIC_RATE * 2:
             await self._send(ws, type="state", value="idle")
             return
+        if self._busy:  # une autre phrase est en cours : sans bouton on l'ignore, au bouton on attend
+            if handsfree:
+                return
+            for _ in range(int(IRIS_TIMEOUT_S * 4)):
+                await asyncio.sleep(0.25)
+                if not self._busy:
+                    break
+        self._busy = True
+        await self._update_listening()
+        try:
+            await self._answer(ws, pcm, handsfree)
+        finally:
+            self._busy = False
+            self.opening.replied(time.monotonic())
+            await self._send(ws, type="state", value="idle")
 
+    async def _answer(self, ws: ServerConnection, pcm: bytes, handsfree: bool) -> None:
         await self._send(ws, type="state", value="thinking")
         text = ""
         try:
             text = await self._stt.transcribe(pcm)
         except Exception as exc:
             log("stt_failed", error=str(exc))
+        if handsfree and text and _PHANTOM.search(text):
+            log("transcript_phantom", text=text)
+            text = ""
         if not text:
-            await self._send(ws, type="error", message="Je n'ai rien compris.")
-            await self._send(ws, type="state", value="idle")
+            if not handsfree:
+                await self._send(ws, type="error", message="Je n'ai rien compris.")
             return
 
         await self._send(ws, type="transcript", text=text)
-        log("transcript", text=text)
-        try:
-            answer = await self._iris.ask(text)
-        except Exception as exc:
-            log("iris_failed", error=str(exc))
-            answer = "Je n'arrive pas à joindre mon cerveau pour l'instant."
+        log("transcript", text=text, handsfree=handsfree)
+        if _PRIVATE_OFF.search(text) and self.opening.private:
+            await self.set_private(False)
+            answer = "D'accord, je t'écoute et je te regarde à nouveau."
+        elif _PRIVATE_ON.search(text) and not _PRIVATE_OFF.search(text):
+            await self.set_private(True)
+            answer = "Mode privé. Je n'écoute plus et je ne regarde plus. Appuie sur le bouton pour me reparler."
+        else:
+            try:
+                answer = await self._iris.ask(text)
+            except Exception as exc:
+                log("iris_failed", error=str(exc))
+                answer = "Je n'arrive pas à joindre mon cerveau pour l'instant."
 
         await self._send(ws, type="reply", text=answer)
-        await self._speak(ws, answer)
-        await self._send(ws, type="state", value="idle")
+        played_s = await self._speak(ws, answer)
+        # La voix est envoyée plus vite qu'elle n'est jouée : on attend la fin de la lecture
+        # avant de rouvrir l'écoute, sinon le micro entend Opal.
+        await asyncio.sleep(max(0.0, played_s - (time.monotonic() - self._spoke_at)) + 0.4)
 
-    async def _speak(self, ws: ServerConnection, text: str) -> None:
+    async def _speak(self, ws: ServerConnection, text: str) -> float:
+        """Envoie la voix ; retourne sa durée de lecture en secondes."""
+        self._spoke_at = time.monotonic()
         sentences = speech_script(text)
         if not sentences:
-            return
+            return 0.0
+        sent = 0
         await self._send(ws, type="state", value="speaking")
         await self._send(ws, type="audio_start", rate=TTS_RATE)
         # Synthèse de la phrase i+1 pendant l'envoi de la phrase i.
@@ -911,7 +1030,9 @@ class OpalBridge:
                 pending = asyncio.create_task(self._tts.synthesize(sentences[i + 1]))
             for off in range(0, len(pcm), AUDIO_CHUNK):
                 await ws.send(pcm[off : off + AUDIO_CHUNK])
+            sent += len(pcm)
         await self._send(ws, type="audio_end")
+        return sent / (TTS_RATE * 2)
 
     @staticmethod
     async def _send(ws: ServerConnection, **payload: object) -> None:
@@ -949,6 +1070,7 @@ async def run(host: str, port: int, device_token: str) -> None:
     activity.start()
     rhythm_task = asyncio.create_task(bridge.rhythm_loop())  # noqa: F841 (vit avec le pont)
     guard_task = asyncio.create_task(bridge.guard_loop())  # noqa: F841
+    opening_task = asyncio.create_task(bridge.opening_loop())  # noqa: F841
     if node_token := iris_node_token():
         node_url = iris_url.replace("http", "ws", 1).rstrip("/") + "/node"
         bridge.node = OpalNode(node_url, node_token, bridge.handle_tool)
