@@ -183,6 +183,9 @@ class Player:
                 if not streaming:
                     streaming = True
                     t0 = time.monotonic() - sent_s  # le compte reprend où il s'était arrêté
+                    # audio_end d'abord : un boîtier resté en « j'ignore la fin de la réponse
+                    # interrompue » (bouton, pont redémarré) se remet à écouter le son.
+                    await self._send_json({"type": "audio_end"})
                     await self._send_json({"type": "state", "value": "speaking"})
                     await self._send_json({"type": "audio_start", "rate": RATE})
                 # Pas plus de LEAD_S secondes d'avance sur ce que le boîtier a joué.

@@ -965,6 +965,7 @@ class OpalBridge:
     async def _handle_box(self, ws: ServerConnection) -> None:
         self._devices.add(ws)
         self._update_node()
+        await self._send(ws, type="audio_end")  # remet à zéro un boîtier qui jetait le son
         await self._send(ws, type="state", value="idle")
         if self.cams.online:
             await self._send(ws, type="presence", present=self.cams.present)
