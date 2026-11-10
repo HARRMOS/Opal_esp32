@@ -1,8 +1,8 @@
 """Pont WebSocket entre Opal Box (ESP32-S3 + ESP32-CAM) et Opal sur le VPS.
 
 Le pont ne contient pas de cerveau : il transcrit la voix, envoie le texte à
-l'API d'Opal (POST /api/command, la même conversation que sur le PC et le Mac),
-puis renvoie la réponse en voix vers le haut-parleur de l'ESP32.
+l'API d'Opal (POST /api/command/stream, la même conversation que sur le PC et le Mac),
+et dit la réponse phrase par phrase, au fil de sa génération, par le haut-parleur de l'ESP32.
 
 Tant qu'un appareil est connecté, le pont se présente aussi à Opal comme un nœud
 (« opal-box », voir node.py) avec les outils yeux, photo et présence. La caméra
@@ -65,6 +65,7 @@ import re
 import sys
 import time
 from collections import deque
+from collections.abc import AsyncIterator
 from datetime import date
 from http import HTTPStatus
 from pathlib import Path
@@ -87,14 +88,16 @@ from rhythm import DayRhythm
 from logs import log
 from node import SCENES, OpalNode, eyes_command
 from opening import MODE_TEXT, Endpointer, Inputs, Opening
+from speech import SpeechFeed, speech_script
 from voice import MIC_RATE, TTS_RATE, Speaker, Transcriber
 from web import make_app
 
 MAX_UTTERANCE_S = 20
 MIN_UTTERANCE_S = 0.3
 AUDIO_CHUNK = 4096  # octets par trame binaire envoyée à l'ESP32
-MAX_SPOKEN_CHARS = 600
 IRIS_TIMEOUT_S = 180
+LONG_ANSWER = "C'est long, je continue en arrière-plan et je te tiens au courant."
+UNREACHABLE_ANSWER = "Je n'arrive pas à joindre mon cerveau pour l'instant."
 GAZE_MIN_INTERVAL_S = 0.1
 NODE_GRACE_S = 30.0
 AWAKE_AFTER_ACTIVITY_S = 120.0  # la nuit, reste éveillée 2 min après une activité
@@ -162,25 +165,6 @@ _PRIVATE_OFF = re.compile(
 # Phrases que Whisper invente sur du bruit : ignorées quand on écoute sans bouton.
 _PHANTOM = re.compile(r"sous-titr|merci d'avoir regard|abonnez|amara\.org|^\W*(merci|musique)\W*$", re.I)
 
-_MARKDOWN = re.compile(r"```[\s\S]*?```|`([^`]*)`|\*\*([^*]+)\*\*|^#{1,6}\s+|^\s*[-•*]\s+", re.M)
-_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
-_URL = re.compile(r"https?://\S+")
-_SENTENCE = re.compile(r"(?<=[.!?…])\s+")
-
-
-def speech_script(text: str) -> list[str]:
-    """Réponse écrite → phrases à prononcer (sans markdown ni URLs, longueur bornée)."""
-    text = _LINK.sub(r"\1", text)
-    text = _URL.sub("", text)
-    text = _MARKDOWN.sub(lambda m: m.group(1) or m.group(2) or "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) > MAX_SPOKEN_CHARS:
-        cut = text[:MAX_SPOKEN_CHARS]
-        end = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
-        text = cut[: end + 1] if end > 80 else cut + "…"
-    return [s for s in _SENTENCE.split(text) if s.strip()]
-
-
 class IrisClient:
     """Appelle l'API d'Opal comme le ferait un raccourci iOS."""
 
@@ -216,9 +200,29 @@ class IrisClient:
             "/api/command", json={"text": text, "timeout": IRIS_TIMEOUT_S}
         )
         if response.status_code == HTTPStatus.ACCEPTED:
-            return "C'est long, je continue en arrière-plan et je te tiens au courant."
+            return LONG_ANSWER
         response.raise_for_status()
         return str(response.json().get("answer") or "")
+
+    async def ask_stream(self, text: str) -> AsyncIterator[dict[str, object]]:
+        """Comme ``ask``, au fil de la génération : événements ``delta`` (texte à dire),
+        ``break`` (une autre prise de parole suit), puis ``answer`` (réponse finale ;
+        ``streamed`` dit si les ``delta`` l'ont déjà donnée)."""
+        async with self._client.stream(
+            "POST", "/api/command/stream", json={"text": text, "timeout": IRIS_TIMEOUT_S}
+        ) as response:
+            old_brain = response.status_code in (HTTPStatus.NOT_FOUND, HTTPStatus.METHOD_NOT_ALLOWED)
+            if not old_brain:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+                    event = json.loads(line)
+                    if event.get("type") == "pending":
+                        event = {"type": "answer", "text": LONG_ANSWER, "streamed": False}
+                    yield event
+        if old_brain:  # cerveau pas encore mis à jour : réponse en une fois
+            yield {"type": "answer", "text": await self.ask(text), "streamed": False}
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -316,7 +320,7 @@ class OpalBridge:
         self.opening = Opening(OPEN_MODE)
         self._listening = False  # écoute sans bouton ouverte (micro en continu)
         self._busy = False       # Opal réfléchit ou parle : on n'écoute pas sa propre voix
-        self._spoke_at = 0.0
+        self._play_until = 0.0  # fin de lecture de la voix déjà envoyée (monotonic)
 
     def set_pending_confirmation(self, confirm_id: str | None) -> None:
         self.pending_confirmation = confirm_id
@@ -838,11 +842,10 @@ class OpalBridge:
             heard = await self.cams.speak(self._tts, sentences, TTS_RATE)
             log("say", kind=kind, heard_by=heard, text=answer[:200])
             if not heard:
-                played = 0.0
                 for ws in list(self._devices):
-                    played = max(played, await self._speak(ws, answer))
+                    await self._speak(ws, answer)
                     await self._send(ws, type="state", value="idle")
-                await asyncio.sleep(max(0.0, played - (time.monotonic() - self._spoke_at)) + 0.4)
+                await self._playback_done()
         finally:
             self._busy = False
             self.opening.replied(time.monotonic())
@@ -993,46 +996,110 @@ class OpalBridge:
         if _PRIVATE_OFF.search(text) and self.opening.private:
             await self.set_private(False)
             answer = "D'accord, je t'écoute et je te regarde à nouveau."
+            await self._speak(ws, answer)
         elif _PRIVATE_ON.search(text) and not _PRIVATE_OFF.search(text):
             await self.set_private(True)
             answer = "Mode privé. Je n'écoute plus et je ne regarde plus. Appuie sur le bouton pour me reparler."
+            await self._speak(ws, answer)
         else:
-            try:
-                answer = await self._iris.ask(text)
-            except Exception as exc:
-                log("iris_failed", error=str(exc))
-                answer = "Je n'arrive pas à joindre mon cerveau pour l'instant."
+            answer = await self._reply(ws, text)
 
         await self._send(ws, type="reply", text=answer)
-        played_s = await self._speak(ws, answer)
         # La voix est envoyée plus vite qu'elle n'est jouée : on attend la fin de la lecture
         # avant de rouvrir l'écoute, sinon le micro entend Opal.
-        await asyncio.sleep(max(0.0, played_s - (time.monotonic() - self._spoke_at)) + 0.4)
+        await self._playback_done()
+
+    async def _reply(self, ws: ServerConnection, text: str) -> str:
+        """Demande à Opal et dit sa réponse au fil de la génération ; retourne le texte final."""
+        sentences: asyncio.Queue[str | None] = asyncio.Queue()
+        speaker = asyncio.create_task(self._speak_queue(ws, sentences))
+        feed = SpeechFeed()
+        answer = ""
+        asked_at = time.monotonic()
+        first_at = 0.0
+        try:
+            async for event in self._iris.ask_stream(text):
+                kind = event.get("type")
+                if kind == "delta":
+                    ready = feed.feed(str(event.get("text") or ""))
+                elif kind == "break":
+                    ready = feed.flush()
+                elif kind == "answer":
+                    answer = str(event.get("text") or "")
+                    if event.get("streamed"):
+                        ready = feed.flush()
+                    else:  # réponse différente de ce qui a été dit en route : on la dit en entier
+                        feed.drop()
+                        ready = speech_script(answer)
+                else:
+                    continue
+                if ready and not first_at:
+                    first_at = time.monotonic()
+                for sentence in ready:
+                    sentences.put_nowait(sentence)
+        except Exception as exc:
+            log("iris_failed", error=str(exc))
+            answer = UNREACHABLE_ANSWER
+            for sentence in speech_script(answer):
+                sentences.put_nowait(sentence)
+        finally:
+            sentences.put_nowait(None)
+        await speaker
+        log(
+            "reply",
+            first_sentence_s=round((first_at or time.monotonic()) - asked_at, 2),
+            total_s=round(time.monotonic() - asked_at, 2),
+        )
+        return answer
 
     async def _speak(self, ws: ServerConnection, text: str) -> float:
         """Envoie la voix ; retourne sa durée de lecture en secondes."""
-        self._spoke_at = time.monotonic()
-        sentences = speech_script(text)
-        if not sentences:
-            return 0.0
+        sentences: asyncio.Queue[str | None] = asyncio.Queue()
+        for sentence in speech_script(text):
+            sentences.put_nowait(sentence)
+        sentences.put_nowait(None)
+        return await self._speak_queue(ws, sentences)
+
+    async def _speak_queue(self, ws: ServerConnection, sentences: asyncio.Queue[str | None]) -> float:
+        """Dit les phrases à mesure qu'elles arrivent (``None`` = fin) ; retourne la durée dite.
+
+        Chaque phrase part en synthèse dès son arrivée, pendant l'envoi des précédentes."""
+        voices: asyncio.Queue[asyncio.Task[bytes] | None] = asyncio.Queue()
+
+        async def synthesize_all() -> None:
+            while (sentence := await sentences.get()) is not None:
+                voices.put_nowait(asyncio.create_task(self._tts.synthesize(sentence)))
+            voices.put_nowait(None)
+
+        feeder = asyncio.create_task(synthesize_all())
         sent = 0
-        await self._send(ws, type="state", value="speaking")
-        await self._send(ws, type="audio_start", rate=TTS_RATE)
-        # Synthèse de la phrase i+1 pendant l'envoi de la phrase i.
-        pending = asyncio.create_task(self._tts.synthesize(sentences[0]))
-        for i in range(len(sentences)):
-            try:
-                pcm = await pending
-            except Exception as exc:
-                log("tts_failed", error=str(exc))
-                break
-            if i + 1 < len(sentences):
-                pending = asyncio.create_task(self._tts.synthesize(sentences[i + 1]))
-            for off in range(0, len(pcm), AUDIO_CHUNK):
-                await ws.send(pcm[off : off + AUDIO_CHUNK])
-            sent += len(pcm)
-        await self._send(ws, type="audio_end")
+        try:
+            while (voice := await voices.get()) is not None:
+                try:
+                    pcm = await voice
+                except Exception as exc:
+                    log("tts_failed", error=str(exc))
+                    continue
+                if not pcm:
+                    continue
+                if not sent:
+                    await self._send(ws, type="state", value="speaking")
+                    await self._send(ws, type="audio_start", rate=TTS_RATE)
+                for off in range(0, len(pcm), AUDIO_CHUNK):
+                    await ws.send(pcm[off : off + AUDIO_CHUNK])
+                sent += len(pcm)
+                # Le boîtier joue chaque phrase à la suite de la précédente, ou tout de suite
+                # s'il avait fini (pause pendant qu'Opal réfléchit encore).
+                self._play_until = max(self._play_until, time.monotonic()) + len(pcm) / (TTS_RATE * 2)
+        finally:
+            feeder.cancel()
+        if sent:
+            await self._send(ws, type="audio_end")
         return sent / (TTS_RATE * 2)
+
+    async def _playback_done(self) -> None:
+        """Attend que le boîtier ait fini de jouer la voix envoyée."""
+        await asyncio.sleep(max(0.0, self._play_until - time.monotonic()) + 0.4)
 
     @staticmethod
     async def _send(ws: ServerConnection, **payload: object) -> None:
