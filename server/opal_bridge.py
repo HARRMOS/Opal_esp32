@@ -88,6 +88,7 @@ from rhythm import DayRhythm
 from logs import log
 from node import SCENES, OpalNode, eyes_command
 from opening import MODE_TEXT, Endpointer, Inputs, Opening
+from player import Player
 from speech import SpeechFeed, speech_script
 from voice import MIC_RATE, TTS_RATE, Speaker, Transcriber
 from web import make_app
@@ -321,6 +322,8 @@ class OpalBridge:
         self._listening = False  # écoute sans bouton ouverte (micro en continu)
         self._busy = False       # Opal réfléchit ou parle : on n'écoute pas sa propre voix
         self._play_until = 0.0  # fin de lecture de la voix déjà envoyée (monotonic)
+        # Sourate (ou autre MP3) jouée sur le haut-parleur ; on n'écoute pas pendant la lecture.
+        self.player = Player(self.send_to_devices, self._send_audio, self._update_listening)
 
     def set_pending_confirmation(self, confirm_id: str | None) -> None:
         self.pending_confirmation = confirm_id
@@ -399,6 +402,18 @@ class OpalBridge:
             return (True, "Tête : c'est fait.") if sent else (False, "Opal Box n'est pas connectée.")
         if tool == "opal_box_ecran":
             return await self._screen_tool(args)
+        if tool == "opal_box_lecture":
+            if str(args.get("action") or "jouer") == "stop":
+                stopped = await self.player.stop()
+                return True, "Lecture arrêtée." if stopped else "Rien n'était en lecture."
+            url = str(args.get("url") or "")
+            if not url.startswith("https://"):
+                return False, "Il me faut l'adresse https du fichier audio."
+            if not self._devices:
+                return False, "Opal Box n'est pas connectée."
+            title = str(args.get("titre") or "").strip()[:80]
+            await self.player.play(url, title)
+            return True, f"Lecture sur le haut-parleur d'Opal Box : {title or url}."
         if tool == "opal_box_verrouiller":
             n = await self.lock_pcs(str(args.get("raison") or "Verrouillage demandé"))
             if not n:
@@ -669,7 +684,7 @@ class OpalBridge:
             identity=self.cams.identity,
             knows_faces=bool(self.cams.faces and self.cams.faces.people),
             looking=self.cams.looking,
-            busy=self._busy or self._saying or self._asleep or self._guarding,
+            busy=self._busy or self._saying or self._asleep or self._guarding or self.player.playing,
         )
         listening, why = self.opening.is_open(state, time.monotonic())
         if listening == self._listening:
@@ -850,6 +865,17 @@ class OpalBridge:
             self._busy = False
             self.opening.replied(time.monotonic())
 
+    async def _send_audio(self, pcm: bytes) -> int:
+        """Envoie du PCM à tous les boîtiers ; retourne leur nombre."""
+        sent = 0
+        for ws in list(self._devices):
+            try:
+                await ws.send(pcm)
+                sent += 1
+            except websockets.ConnectionClosed:
+                pass
+        return sent
+
     async def send_to_devices(self, payload: dict[str, object]) -> int:
         """Envoie un message à tous les boîtiers connectés ; retourne leur nombre."""
         message = json.dumps(payload, ensure_ascii=False)
@@ -943,6 +969,7 @@ class OpalBridge:
                 msg = json.loads(message)
                 kind = msg.get("type")
                 if kind == "start":
+                    await self.player.stop()  # appuyer sur le bouton coupe la sourate pour parler
                     ep.reset()
                     audio.clear()
                     recording = True
@@ -1083,6 +1110,7 @@ class OpalBridge:
                 if not pcm:
                     continue
                 if not sent:
+                    await self.player.stop()  # Opal parle : la sourate s'arrête
                     await self._send(ws, type="state", value="speaking")
                     await self._send(ws, type="audio_start", rate=TTS_RATE)
                 for off in range(0, len(pcm), AUDIO_CHUNK):

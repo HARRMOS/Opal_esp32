@@ -244,14 +244,34 @@ LISTEN_TOOL = {
     },
 }
 
+PLAY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "opal_box_lecture",
+        "description": (
+            "Joue un fichier audio en ligne (MP3 en https) sur le haut-parleur d'Opal Box, ou "
+            "arrête la lecture en cours (action « stop »). Pour une sourate, utilise play_surah "
+            "avec ou=« robot » : il trouve la récitation et appelle cet outil."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["jouer", "stop"]},
+                "url": {"type": "string", "description": "Adresse https du MP3 (pour jouer)."},
+                "titre": {"type": "string", "description": "Titre affiché dans les journaux."},
+            },
+        },
+    },
+}
+
 TOOLS = [EYES_TOOL, PHOTO_TOOL, PRESENCE_TOOL, LEARN_FACE_TOOL, FORGET_FACE_TOOL, HEAD_TOOL,
-         SCREEN_TOOL, LOCK_TOOL, LISTEN_TOOL]
+         SCREEN_TOOL, LOCK_TOOL, LISTEN_TOOL, PLAY_TOOL]
 
 ENVIRONMENT = (
     "## OPAL BOX\n"
     "« opal-box » n'est pas un ordinateur : c'est ton corps physique posé chez l'utilisateur, "
     "avec deux yeux animés (opal_box_yeux) qui peuvent aussi afficher des animations "
-    "(opal_box_ecran : horloge, météo, minuteur, cœurs…), une tête qui tourne (opal_box_tete) et une "
+    "(opal_box_ecran : horloge, météo, minuteur, cœurs…), une tête qui tourne (opal_box_tete), un haut-parleur (opal_box_lecture : sourates, audio) et une "
     "caméra (opal_box_photo, opal_box_presence, "
     "opal_box_memoriser_visage, opal_box_oublier_visage : elle reconnaît les visages appris). "
     "Ne lui envoie jamais d'outil d'ordinateur (apps, fichiers, navigateur). Tes yeux suivent "
