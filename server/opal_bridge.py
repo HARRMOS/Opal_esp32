@@ -69,6 +69,7 @@ from collections.abc import AsyncIterator
 from datetime import date
 from http import HTTPStatus
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -324,6 +325,7 @@ class OpalBridge:
         self._play_until = 0.0  # fin de lecture de la voix déjà envoyée (monotonic)
         # Sourate (ou autre MP3) jouée sur le haut-parleur ; on n'écoute pas pendant la lecture.
         self.player = Player(self.send_to_devices, self._send_audio, self._update_listening)
+        self._music_held = False  # sourate mise en pause pour la voix : elle reprend après
 
     def set_pending_confirmation(self, confirm_id: str | None) -> None:
         self.pending_confirmation = confirm_id
@@ -343,7 +345,7 @@ class OpalBridge:
         else:
             self._node_stop = asyncio.get_running_loop().call_later(NODE_GRACE_S, self.node.stop)
 
-    async def handle_tool(self, tool: str, args: dict[str, object]) -> tuple[bool, str]:
+    async def handle_tool(self, tool: str, args: dict[str, object]) -> tuple[Any, ...]:
         """Outils d'Opal Box appelés par Opal (voir node.py)."""
         if tool == "opal_box_yeux":
             cmd, summary = eyes_command(args)
@@ -403,17 +405,7 @@ class OpalBridge:
         if tool == "opal_box_ecran":
             return await self._screen_tool(args)
         if tool == "opal_box_lecture":
-            if str(args.get("action") or "jouer") == "stop":
-                stopped = await self.player.stop()
-                return True, "Lecture arrêtée." if stopped else "Rien n'était en lecture."
-            url = str(args.get("url") or "")
-            if not url.startswith("https://"):
-                return False, "Il me faut l'adresse https du fichier audio."
-            if not self._devices:
-                return False, "Opal Box n'est pas connectée."
-            title = str(args.get("titre") or "").strip()[:80]
-            await self.player.play(url, title)
-            return True, f"Lecture sur le haut-parleur d'Opal Box : {title or url}."
+            return await self._play_tool(args)
         if tool == "opal_box_verrouiller":
             n = await self.lock_pcs(str(args.get("raison") or "Verrouillage demandé"))
             if not n:
@@ -437,6 +429,41 @@ class OpalBridge:
                 return False, f"Je ne connais pas le visage de {name}."
             return True, f"J'ai oublié le visage de {name}."
         return False, f"Outil inconnu : {tool}"
+
+    async def _play_tool(self, args: dict[str, object]) -> tuple[bool, str, dict[str, object]]:
+        """Outil opal_box_lecture : jouer, pause, reprendre, volume, stop, état."""
+        action = str(args.get("action") or "jouer")
+        player = self.player
+        if action != "etat":
+            self._music_held = False  # une demande explicite l'emporte sur la reprise auto
+        if action == "jouer":
+            url = str(args.get("url") or "")
+            if not url.startswith("https://"):
+                return False, "Il me faut l'adresse https du fichier audio.", {}
+            if not self._devices:
+                return False, "Opal Box n'est pas connectée.", {}
+            if args.get("volume") is not None:
+                player.set_volume(int(float(str(args["volume"]))))
+            await player.play(url, str(args.get("titre") or "").strip()[:80])
+            text = f"Lecture sur le haut-parleur d'Opal Box : {player.title or url}."
+        elif action == "stop":
+            text = "Lecture arrêtée." if await player.stop() else "Rien n'était en lecture."
+        elif action == "pause":
+            text = "En pause." if await player.pause() else "Rien à mettre en pause."
+        elif action == "reprendre":
+            text = "Ça reprend." if await player.resume() else "Rien n'était en pause."
+        elif action == "volume":
+            if args.get("volume") is not None:
+                player.set_volume(int(float(str(args["volume"]))))
+            elif args.get("ecart") is not None:
+                player.set_volume(player.volume + int(float(str(args["ecart"]))))
+            text = f"Volume à {player.volume} %."
+        elif action == "etat":
+            text = (f"{'En pause' if player.paused else 'En lecture'} : {player.title}, volume "
+                    f"{player.volume} %." if player.playing else "Rien en lecture.")
+        else:
+            return False, f"Action inconnue : {action}.", {}
+        return True, text, player.status()
 
     async def _screen_tool(self, args: dict[str, object]) -> tuple[bool, str]:
         """Outil opal_box_ecran : animation plein écran et/ou style des yeux."""
@@ -969,7 +996,7 @@ class OpalBridge:
                 msg = json.loads(message)
                 kind = msg.get("type")
                 if kind == "start":
-                    await self.player.stop()  # appuyer sur le bouton coupe la sourate pour parler
+                    await self._hold_music()  # la sourate se tait pendant qu'on parle
                     ep.reset()
                     audio.clear()
                     recording = True
@@ -986,6 +1013,7 @@ class OpalBridge:
     async def _handle_utterance(self, ws: ServerConnection, pcm: bytes, handsfree: bool = False) -> None:
         if len(pcm) < MIN_UTTERANCE_S * MIC_RATE * 2:
             await self._send(ws, type="state", value="idle")
+            asyncio.create_task(self._release_music())
             return
         if self._busy:  # une autre phrase est en cours : sans bouton on l'ignore, au bouton on attend
             if handsfree:
@@ -1002,6 +1030,7 @@ class OpalBridge:
             self._busy = False
             self.opening.replied(time.monotonic())
             await self._send(ws, type="state", value="idle")
+            asyncio.create_task(self._release_music())
 
     async def _answer(self, ws: ServerConnection, pcm: bytes, handsfree: bool) -> None:
         await self._send(ws, type="state", value="thinking")
@@ -1110,7 +1139,7 @@ class OpalBridge:
                 if not pcm:
                     continue
                 if not sent:
-                    await self.player.stop()  # Opal parle : la sourate s'arrête
+                    await self._hold_music()  # Opal parle : la sourate attend
                     await self._send(ws, type="state", value="speaking")
                     await self._send(ws, type="audio_start", rate=TTS_RATE)
                 for off in range(0, len(pcm), AUDIO_CHUNK):
@@ -1124,6 +1153,22 @@ class OpalBridge:
         if sent:
             await self._send(ws, type="audio_end")
         return sent / (TTS_RATE * 2)
+
+    async def _hold_music(self) -> None:
+        if await self.player.pause(for_voice=True):
+            self._music_held = True
+
+    async def _release_music(self) -> None:
+        """Après la réponse d'Opal (voix jouée en entier), la sourate mise en attente reprend."""
+        if not self._music_held:
+            return
+        for _ in range(240):  # Opal réfléchit encore, ou une autre phrase a suivi
+            await self._playback_done()
+            if not self._busy and time.monotonic() >= self._play_until:
+                break
+        if self._music_held:  # ni arrêtée ni mise en pause entre-temps par une demande
+            self._music_held = False
+            await self.player.resume()
 
     async def _playback_done(self) -> None:
         """Attend que le boîtier ait fini de jouer la voix envoyée."""

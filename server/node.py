@@ -249,14 +249,17 @@ PLAY_TOOL = {
     "function": {
         "name": "opal_box_lecture",
         "description": (
-            "Joue un fichier audio en ligne (MP3 en https) sur le haut-parleur d'Opal Box, ou "
-            "arrête la lecture en cours (action « stop »). Pour une sourate, utilise play_surah "
-            "avec ou=« robot » : il trouve la récitation et appelle cet outil."
+            "Haut-parleur d'Opal Box : joue un MP3 en ligne (https), met en pause, reprend, règle "
+            "le volume, arrête, ou donne l'état de la lecture. Pour lancer une sourate, utilise "
+            "play_surah avec ou=« robot » (il trouve la récitation et appelle cet outil)."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["jouer", "stop"]},
+                "action": {"type": "string",
+                           "enum": ["jouer", "pause", "reprendre", "volume", "stop", "etat"]},
+                "volume": {"type": "integer", "description": "Volume en % (0 à 100)."},
+                "ecart": {"type": "integer", "description": "Variation du volume, ex. 10 ou -10."},
                 "url": {"type": "string", "description": "Adresse https du MP3 (pour jouer)."},
                 "titre": {"type": "string", "description": "Titre affiché dans les journaux."},
             },
@@ -307,7 +310,8 @@ def eyes_command(args: dict[str, Any]) -> tuple[dict[str, Any], str]:
     return cmd, ", ".join(done)
 
 
-ToolHandler = Callable[[str, dict[str, Any]], Awaitable[tuple[bool, str]]]
+# (succès, texte) ou (succès, texte, état structuré)
+ToolHandler = Callable[[str, dict[str, Any]], Awaitable[tuple[Any, ...]]]
 
 
 class OpalNode:
@@ -377,10 +381,12 @@ class OpalNode:
     async def _call(self, ws: Any, msg: dict[str, Any]) -> None:
         reply: dict[str, Any] = {"type": "result", "id": msg.get("id")}
         try:
-            ok, text = await self._handler(str(msg.get("tool")), msg.get("arguments") or {})
+            ok, text, *data = await self._handler(str(msg.get("tool")), msg.get("arguments") or {})
         except Exception as exc:
-            ok, text = False, f"Erreur sur Opal Box : {exc or type(exc).__name__}"
+            ok, text, data = False, f"Erreur sur Opal Box : {exc or type(exc).__name__}", []
         reply.update({"success": True, "output": text} if ok else {"success": False, "error": text})
+        if data:  # état structuré (lecture…) pour l'interface d'Opal
+            reply["data"] = data[0]
         try:
             await ws.send(json.dumps(reply, ensure_ascii=False))
         except websockets.WebSocketException:
