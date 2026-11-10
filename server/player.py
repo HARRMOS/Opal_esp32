@@ -34,12 +34,16 @@ class SpeakerFilter:
 
     - coupe-bas (FIR à phase linéaire, ~150 Hz) : le haut-parleur ne rend pas les graves, il les
       transforme en grésillement et en vibrations de la coque ;
-    - gain (volume) puis limiteur doux : au-dessus de 70 %, les crêtes s'arrondissent au lieu
-      d'être coupées net.
+    - niveau automatique : les récitations enregistrées bas (ou leurs passages doux) sont
+      remontées jusqu'à MAX_BOOST fois, vers un niveau fort et régulier ;
+    - gain (volume) puis limiteur doux : les crêtes s'arrondissent au lieu d'être coupées net.
     """
 
     TAPS = 511
     CUTOFF_HZ = 150.0
+    TARGET_RMS = 0.22   # niveau visé (≈ −13 dB sous le maximum), avant le volume
+    MAX_BOOST = 4.0
+    SILENCE = 0.002     # en dessous : silence entre deux versets, on ne remonte pas le souffle
 
     def __init__(self, rate: int = RATE) -> None:
         n = np.arange(self.TAPS) - (self.TAPS - 1) / 2
@@ -48,12 +52,19 @@ class SpeakerFilter:
         self._kernel = -lowpass
         self._kernel[(self.TAPS - 1) // 2] += 1.0  # passe-tout − passe-bas = coupe-bas
         self._tail = np.zeros(self.TAPS - 1)
+        self._level = 0.0  # niveau mesuré, lissé (0 : pas encore de son)
 
     def process(self, chunk: bytes, gain: float) -> bytes:
         x = np.frombuffer(chunk, dtype="<i2").astype(np.float64)
         padded = np.concatenate([self._tail, x])
         self._tail = padded[-(self.TAPS - 1):]
-        y = np.convolve(padded, self._kernel, mode="valid") * gain / 32768.0
+        y = np.convolve(padded, self._kernel, mode="valid") / 32768.0
+        rms = float(np.sqrt(np.mean(y**2))) if y.size else 0.0
+        if rms > self.SILENCE:  # monte vite si ça devient fort, redescend lentement
+            speed = 1.0 if not self._level else 0.5 if rms > self._level else 0.04
+            self._level += (rms - self._level) * speed
+        boost = self.TARGET_RMS / self._level if self._level else 1.0
+        y *= min(self.MAX_BOOST, max(1.0, boost)) * gain
         # Linéaire jusqu'à 0,8, puis arrondi vers 1 (jamais de coupure nette).
         over = np.abs(y) > 0.8
         y[over] = np.sign(y[over]) * (0.8 + 0.2 * np.tanh((np.abs(y[over]) - 0.8) / 0.2))
@@ -118,7 +129,7 @@ class Player:
         self._stop = threading.Event()
         self._running = asyncio.Event()   # posé = lecture, levé = pause
         self.title = ""
-        self.volume = DEVICE_VOLUME     # % de la puissance de l'ampli (le boîtier joue à 70 %)
+        self.volume = 100               # % de la puissance de l'ampli (le boîtier joue à 70 %)
         self._played_s = 0.0
 
     @property
