@@ -23,8 +23,8 @@ Protocole du boîtier (yeux + son) :
     texte  {"type": "state", "value": "listening|thinking|speaking|idle"}
     texte  {"type": "transcript", "text": "..."}
     texte  {"type": "reply", "text": "..."}
-    texte  {"type": "audio_start", "rate": 24000}
-    binaire PCM 16 bits mono 24 kHz       voix d'Opal
+    texte  {"type": "audio_start", "rate": 48000}
+    binaire PCM 16 bits mono 48 kHz       voix d'Opal, sourates
     texte  {"type": "audio_end"}
     texte  {"type": "error", "message": "..."}
     texte  {"type": "eyes", "mood"?, "look"?: [x, y] | "auto", "blink"?, "wink"?, "pupil"?, "hold_ms"}

@@ -1,7 +1,7 @@
 """Lecture d'un MP3 en ligne (sourate…) sur le haut-parleur d'Opal Box.
 
 Le MP3 est téléchargé et décodé au fil de l'eau (miniaudio), puis envoyé au boîtier en PCM
-16 bits mono 24 kHz, comme la voix d'Opal, au rythme de la lecture : le boîtier n'a jamais plus
+16 bits mono à 48 kHz, comme la voix d'Opal, au rythme de la lecture : le boîtier n'a jamais plus
 de LEAD_S secondes d'avance, donc « stop » coupe presque aussitôt, et une sourate d'une heure
 ne remplit pas sa mémoire.
 """
@@ -9,6 +9,7 @@ ne remplit pas sa mémoire.
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator
@@ -19,11 +20,44 @@ import numpy as np
 
 from logs import log
 
-RATE = 24_000
+# Cadence du son envoyé au boîtier, voix d'Opal comprise (voice.py) : il n'en change jamais.
+# OPAL_AUDIO_RATE=24000 pour revenir à l'ancienne qualité.
+RATE = int(os.environ.get("OPAL_AUDIO_RATE", "48000"))
 CHUNK = 4096        # octets par trame (comme la voix)
 LEAD_S = 3.0        # avance maximale du boîtier sur la lecture
 QUEUE_CHUNKS = 64   # ~5 s décodées d'avance côté pont
 DEVICE_VOLUME = 70  # volume fixe du boîtier (SPK_VOLUME du firmware)
+
+
+class SpeakerFilter:
+    """Prépare le son pour le petit haut-parleur du boîtier, morceau par morceau.
+
+    - coupe-bas (FIR à phase linéaire, ~150 Hz) : le haut-parleur ne rend pas les graves, il les
+      transforme en grésillement et en vibrations de la coque ;
+    - gain (volume) puis limiteur doux : au-dessus de 70 %, les crêtes s'arrondissent au lieu
+      d'être coupées net.
+    """
+
+    TAPS = 511
+    CUTOFF_HZ = 150.0
+
+    def __init__(self, rate: int = RATE) -> None:
+        n = np.arange(self.TAPS) - (self.TAPS - 1) / 2
+        lowpass = np.sinc(2 * self.CUTOFF_HZ / rate * n) * np.blackman(self.TAPS)
+        lowpass /= lowpass.sum()
+        self._kernel = -lowpass
+        self._kernel[(self.TAPS - 1) // 2] += 1.0  # passe-tout − passe-bas = coupe-bas
+        self._tail = np.zeros(self.TAPS - 1)
+
+    def process(self, chunk: bytes, gain: float) -> bytes:
+        x = np.frombuffer(chunk, dtype="<i2").astype(np.float64)
+        padded = np.concatenate([self._tail, x])
+        self._tail = padded[-(self.TAPS - 1):]
+        y = np.convolve(padded, self._kernel, mode="valid") * gain / 32768.0
+        # Linéaire jusqu'à 0,8, puis arrondi vers 1 (jamais de coupure nette).
+        over = np.abs(y) > 0.8
+        y[over] = np.sign(y[over]) * (0.8 + 0.2 * np.tanh((np.abs(y[over]) - 0.8) / 0.2))
+        return (y * 32767).astype("<i2").tobytes()
 
 
 class HttpSource(miniaudio.StreamableSource):
@@ -151,12 +185,6 @@ class Player:
         self.volume = max(0, min(100, int(volume)))
         return self.volume
 
-    def _scaled(self, chunk: bytes) -> bytes:
-        if self.volume == DEVICE_VOLUME:
-            return chunk
-        gain = self.volume / DEVICE_VOLUME
-        samples = np.frombuffer(chunk, dtype="<i2").astype(np.int32) * gain
-        return np.clip(samples, -32768, 32767).astype("<i2").tobytes()
 
     async def _run(self, url: str, stop: threading.Event) -> None:
         loop = asyncio.get_running_loop()
@@ -170,6 +198,7 @@ class Player:
             except Exception:  # boucle arrêtée, lecture annulée
                 stop.set()
 
+        speaker = SpeakerFilter()
         loop.run_in_executor(None, decode_stream, url, stop, emit)  # s'arrête seul quand stop est posé
         streaming = False  # le boîtier a reçu audio_start (et pas encore audio_end)
         sent_s = 0.0
@@ -192,7 +221,7 @@ class Player:
                 ahead = sent_s - (time.monotonic() - t0)
                 if ahead > LEAD_S:
                     await asyncio.sleep(ahead - LEAD_S)
-                if not await self._send_pcm(self._scaled(chunk)):
+                if not await self._send_pcm(speaker.process(chunk, self.volume / DEVICE_VOLUME)):
                     break  # plus aucun boîtier connecté
                 sent_s += len(chunk) / (RATE * 2)
                 self._played_s = max(0.0, sent_s - LEAD_S)

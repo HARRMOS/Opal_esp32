@@ -10,9 +10,10 @@ import miniaudio
 import numpy as np
 
 from logs import log
+from player import RATE as AUDIO_RATE
 
 MIC_RATE = 16_000
-TTS_RATE = 24_000
+TTS_RATE = AUDIO_RATE  # même cadence que les sourates : le boîtier n'en change jamais
 
 
 class Transcriber:
@@ -54,7 +55,7 @@ class Transcriber:
 
 
 class Speaker:
-    """Texte → PCM 16 bits mono 24 kHz, avec la voix Edge d'Opal."""
+    """Texte → PCM 16 bits mono (TTS_RATE), avec la voix Edge d'Opal."""
 
     def __init__(self) -> None:
         self._voice = os.environ.get("OPAL_TTS_VOICE", "fr-FR-RemyMultilingualNeural")
