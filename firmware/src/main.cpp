@@ -9,12 +9,15 @@
 #include <WebSocketsClient.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <esp_private/brownout.h>
 #include <freertos/ringbuf.h>
+#include <soc/rtc_cntl_reg.h>
 
 #include "ca_certs.h"
 #include "config.h"
 #include "eyes.h"
 #include "head.h"
+#include "wifi_setup.h"
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
@@ -267,9 +270,9 @@ static void onText(const uint8_t* payload, size_t length) {
     // Regarder la personne, sauf si Opal impose une expression ou réfléchit.
     if (!eyesHeld && state != State::Thinking && state != State::Error) {
       // La tête fait le gros du mouvement, les yeux le reste.
-      const float gx = doc["x"] | 0.f;
-      head::lookAt(gx * HEAD_FOLLOW);
-      eyes::lookAt(gx * (1 - HEAD_FOLLOW) * 1.5f, doc["y"] | 0.f);
+      const float gx = doc["x"] | 0.f, gy = doc["y"] | 0.f;
+      head::lookAt(gx * HEAD_FOLLOW, gy * HEAD_FOLLOW);
+      eyes::lookAt(gx * (1 - HEAD_FOLLOW) * 1.5f, gy * (1 - HEAD_FOLLOW) * 1.5f);
       gazeUntil = millis() + GAZE_HOLD_MS;
     }
   } else if (strcmp(type, "camera_fx") == 0) {  // Opal prend une photo
@@ -280,6 +283,7 @@ static void onText(const uint8_t* payload, size_t length) {
   } else if (strcmp(type, "head") == 0) {  // Opal ou le pont bouge la tête
     const char* gesture = doc["gesture"] | "";
     if (strcmp(gesture, "shake") == 0) head::shake();
+    else if (strcmp(gesture, "nod") == 0) head::nod();
     else if (strcmp(gesture, "wiggle") == 0) head::wiggle();
     JsonVariant look = doc["look"];
     if (look.is<float>() || look.is<int>()) head::lookAt(look.as<float>());
@@ -397,16 +401,59 @@ static void handleButton() {
 
 // ---------------------------------------------------------------------------
 
+// Étape du démarrage atteinte, gardée à travers un redémarrage : la LED la montre au démarrage suivant.
+RTC_NOINIT_ATTR static uint32_t bootStage;
+
+static void flash(uint8_t r, uint8_t g, uint8_t b, int times) {
+  for (int i = 0; i < times; i++) {
+    rgbLedWrite(LED_PIN, r, g, b);
+    delay(250);
+    rgbLedWrite(LED_PIN, 0, 0, 0);
+    delay(250);
+  }
+}
+
+// Après un plantage : couleur = raison (jaune : courant, rouge : erreur du programme, violet : programme
+// bloqué), puis autant d'éclairs bleus que l'étape atteinte (1 yeux, 2 servos, 3 son, 4 WiFi, 5 serveur).
+static void showLastCrash() {
+  const esp_reset_reason_t why = esp_reset_reason();
+  const uint32_t stage = bootStage;
+  bootStage = 0;
+  if (why == ESP_RST_POWERON || why == ESP_RST_SW || why == ESP_RST_USB || why == ESP_RST_EXT) {
+    flash(0, 60, 0, 1);  // démarrage normal : un éclair vert
+    return;
+  }
+  if (why == ESP_RST_BROWNOUT) flash(70, 50, 0, 3);
+  else if (why == ESP_RST_PANIC) flash(90, 0, 0, 3);
+  else flash(60, 0, 80, 3);
+  delay(500);
+  if (stage >= 1 && stage <= 5) flash(0, 0, 90, (int)stage);
+  delay(800);
+}
+
 void setup() {
+  // Carte HW-678 : son régulateur 3,3 V décroche un instant à chaque pic (WiFi, I2S) même sur un bon
+  // chargeur. La puce supporte ces creux ; sans la protection, elle ne redémarre plus pour rien.
+  esp_brownout_disable();
+  showLastCrash();
   Serial.begin(115200);
   pinMode(PTT_PIN, INPUT_PULLUP);
   Serial.printf("\nOpal — PSRAM %lu Ko libre\n", (unsigned long)(ESP.getFreePsram() / 1024));
 
+  bootStage = 1;
+  Serial.printf("étape 1\n");
+  Serial.flush();
   eyes::begin();  // les yeux tournent seuls, un œil par cœur (démarrage sombre = peu de courant)
   // L'animation de démarrage (écrans bien allumés) est jouée APRÈS le WiFi : sinon son pic de
   // courant s'ajoute à celui de l'association WiFi et déclenche le brownout sur une alim juste.
+  bootStage = 2;
+  Serial.printf("étape 2\n");
+  Serial.flush();
   head::begin();  // tête au centre (moment de visser le palonnier bien droit)
   setState(State::Connecting);
+  bootStage = 3;
+  Serial.printf("étape 3\n");
+  Serial.flush();
 
   spkBuffer = xRingbufferCreateWithCaps(SPK_BUFFER_BYTES, RINGBUF_TYPE_BYTEBUF, MALLOC_CAP_SPIRAM);
   if (!spkBuffer) {
@@ -426,16 +473,11 @@ void setup() {
   }
   xTaskCreatePinnedToCore(speakerTask, "speaker", 4096, nullptr, 5, nullptr, 0);
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);  // latence audio
-  WiFi.setTxPower(WIFI_POWER_8_5dBm);  // boîte proche du routeur : réduit le pic de courant radio
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.printf("WiFi %s", WIFI_SSID);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(300);
-    Serial.print('.');
-  }
-  Serial.printf("\nIP %s -> pont %s://%s:%d%s\n", WiFi.localIP().toString().c_str(),
+  bootStage = 4;
+  Serial.printf("étape 4\n");
+  Serial.flush();
+  wifisetup::connect();  // réseau enregistré, sinon portail « Opal-config » depuis le téléphone
+  Serial.printf("IP %s -> pont %s://%s:%d%s\n", WiFi.localIP().toString().c_str(),
                 OPAL_USE_TLS ? "wss" : "ws", OPAL_SERVER_HOST, OPAL_SERVER_PORT,
                 OPAL_SERVER_PATH);
 
@@ -458,6 +500,9 @@ void setup() {
   ws.setReconnectInterval(2000);
   ws.enableHeartbeat(15000, 3000, 2);
 
+  bootStage = 5;
+  Serial.printf("étape 5\n");
+  Serial.flush();
   // WiFi associé : le gros pic de courant est passé, on peut jouer l'animation de démarrage.
   eyes::showScene(eyes::Scene::Boot, 2500);
 }
