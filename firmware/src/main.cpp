@@ -59,6 +59,12 @@ static bool handsFree = false;
 static bool privateMode = false;
 static bool nightSleep = false;
 static volatile uint32_t spkLastMs = 0;  // dernier son joué
+// Mesures du son reçu, envoyées au pont toutes les STATS_MS pendant une lecture (journaux du VPS).
+static constexpr uint32_t STATS_MS = 5000;
+static volatile bool audioStreaming = false;      // entre audio_start et audio_end
+static volatile uint32_t statUnderruns = 0;       // tampon vide en pleine lecture : un clic
+static volatile uint32_t statRxBytes = 0;
+static volatile uint32_t statMinBufferedMs = UINT32_MAX;
 #define ECHO_GUARD_MS 400
 static int32_t micRaw[MIC_CHUNK_SAMPLES];
 static int16_t micPcm[MIC_CHUNK_SAMPLES];
@@ -159,7 +165,10 @@ static void speakerTask(void*) {
   for (;;) {
     size_t len = 0;
     auto* data = (int16_t*)xRingbufferReceiveUpTo(spkBuffer, &len, pdMS_TO_TICKS(50), 2048);
-    if (!data) continue;
+    if (!data) {
+      if (audioStreaming && !discardAudio && millis() - spkLastMs < 1000) statUnderruns++;
+      continue;
+    }
     if (spkRate != currentRate) {
       currentRate = spkRate;
       spk.configureTX(currentRate, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
@@ -265,8 +274,10 @@ static void onText(const uint8_t* payload, size_t length) {
     Serial.printf("Iris : %s\n", (const char*)(doc["text"] | ""));
   } else if (strcmp(type, "audio_start") == 0) {
     spkRate = doc["rate"] | SPK_DEFAULT_RATE;
+    audioStreaming = true;
   } else if (strcmp(type, "audio_end") == 0) {
     discardAudio = false;
+    audioStreaming = false;
   } else if (strcmp(type, "eyes") == 0) {
     applyEyesCommand(doc);
   } else if (strcmp(type, "gaze") == 0) {
@@ -354,6 +365,10 @@ static void onWsEvent(WStype_t type, uint8_t* payload, size_t length) {
       if (!discardAudio) {
         // Bloque si le tampon est plein : TCP ralentit alors le serveur.
         xRingbufferSend(spkBuffer, payload, length, pdMS_TO_TICKS(2000));
+        statRxBytes += length;
+        const uint32_t buffered = SPK_BUFFER_BYTES - xRingbufferGetCurFreeSize(spkBuffer);
+        const uint32_t ms = buffered * 1000 / (spkRate * 2);
+        if (ms < statMinBufferedMs) statMinBufferedMs = ms;
       }
       break;
     default:
@@ -515,8 +530,35 @@ void setup() {
   eyes::showScene(eyes::Scene::Boot, 2500);
 }
 
+// Pendant une lecture : clics (tampon vide), débit reçu, réserve minimale, signal WiFi.
+static void sendAudioStats() {
+  static uint32_t last = 0;
+  if (millis() - last < STATS_MS) return;
+  const uint32_t elapsed = millis() - last;
+  last = millis();
+  if (!audioStreaming && !statUnderruns) {
+    statRxBytes = 0;
+    return;
+  }
+  JsonDocument doc;
+  doc["type"] = "stats";
+  doc["underruns"] = statUnderruns;
+  doc["rx_kbps"] = statRxBytes * 8 / elapsed;
+  doc["buffer_min_ms"] = statMinBufferedMs == UINT32_MAX ? -1 : (int)statMinBufferedMs;
+  doc["rate"] = spkRate;
+  doc["rssi"] = WiFi.RSSI();
+  doc["heap_kb"] = ESP.getFreeHeap() / 1024;
+  statUnderruns = 0;
+  statRxBytes = 0;
+  statMinBufferedMs = UINT32_MAX;
+  String out;
+  serializeJson(doc, out);
+  ws.sendTXT(out);
+}
+
 void loop() {
   ws.loop();
+  sendAudioStats();
   head::update();
   handleButton();
   if (eyesHeld && eyesHoldUntil && (int32_t)(millis() - eyesHoldUntil) >= 0) releaseEyes();

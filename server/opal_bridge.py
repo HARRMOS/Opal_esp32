@@ -1028,6 +1028,8 @@ class OpalBridge:
                     audio.clear()
                     recording = True
                     await self._send(ws, type="state", value="listening")
+                elif kind == "stats":  # mesures du son reçu par le boîtier (clics, débit, WiFi)
+                    log("box_audio", **{k: v for k, v in msg.items() if k != "type"})
                 elif kind == "stop" and recording:
                     recording = False
                     pcm = bytes(audio)

@@ -26,6 +26,7 @@ RATE = int(os.environ.get("OPAL_AUDIO_RATE", "48000"))
 CHUNK = 4096        # octets par trame (comme la voix)
 LEAD_S = 3.0        # avance maximale du boîtier sur la lecture
 QUEUE_CHUNKS = 64   # ~5 s décodées d'avance côté pont
+STATS_S = 10.0      # mesures de l'envoi dans les journaux
 DEVICE_VOLUME = 70  # volume pour lequel le son passe tel quel (le reste : gain du pont)
 
 
@@ -214,6 +215,9 @@ class Player:
         streaming = False  # le boîtier a reçu audio_start (et pas encore audio_end)
         sent_s = 0.0
         t0 = 0.0
+        # Mesures toutes les STATS_S : avance minimale gardée sur le boîtier (≤ 0 : il a manqué
+        # de son), envoi le plus lent (réseau qui freine).
+        stats_at, ahead_min, send_max = time.monotonic(), LEAD_S, 0.0
         log("player_start", title=self.title, url=url[:120])
         try:
             while (chunk := await queue.get()) is not None:
@@ -232,9 +236,16 @@ class Player:
                 ahead = sent_s - (time.monotonic() - t0)
                 if ahead > LEAD_S:
                     await asyncio.sleep(ahead - LEAD_S)
+                sending = time.monotonic()
                 if not await self._send_pcm(speaker.process(chunk, self.volume / DEVICE_VOLUME)):
                     break  # plus aucun boîtier connecté
+                send_max = max(send_max, time.monotonic() - sending)
                 sent_s += len(chunk) / (RATE * 2)
+                ahead_min = min(ahead_min, sent_s - (time.monotonic() - t0))
+                if time.monotonic() - stats_at >= STATS_S:
+                    log("player_stats", ahead_min_s=round(ahead_min, 2),
+                        send_max_ms=round(send_max * 1000), position_s=round(self._played_s))
+                    stats_at, ahead_min, send_max = time.monotonic(), LEAD_S, 0.0
                 self._played_s = max(0.0, sent_s - LEAD_S)
             log("player_end", title=self.title, seconds=round(sent_s))
         finally:
