@@ -36,8 +36,8 @@
 #define EYE_RST 14
 #define EYE_SPI_HZ 80000000  // baisser à 40 MHz si image parasitée (fils longs)
 #define EYE_INVERT true       // couleurs inversées ? passer à false
-#define EYE_L_ROTATION 0      // 0-3 selon le montage des écrans
-#define EYE_R_ROTATION 0
+#define EYE_L_ROTATION 2      // 0-3 ; 2 : languette à broches en haut (support des yeux du 11/11)
+#define EYE_R_ROTATION 2
 
 // Cou : deux servos MG90S. PAN (dans le socle) tourne la tête de gauche à droite,
 // TILT (dans la colonne du cou) l'incline de haut en bas.

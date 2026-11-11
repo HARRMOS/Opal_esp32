@@ -12,6 +12,7 @@ import asyncio
 import os
 import threading
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
 
 import httpx
@@ -132,6 +133,11 @@ class Player:
         self.title = ""
         self.volume = 100               # % de la puissance de l'ampli (le boîtier joue à 70 %)
         self._played_s = 0.0
+        # Où en est le boîtier : à la pause, sa réserve est vidée (arrêt immédiat) et ce qu'il n'avait
+        # pas encore joué est renvoyé à la reprise, pour ne rien sauter.
+        self._sent_s = 0.0
+        self._t0 = 0.0
+        self._rewind_s = 0.0
 
     @property
     def playing(self) -> bool:
@@ -162,6 +168,7 @@ class Player:
         if task is None or task.done():
             return False
         self._stop.set()
+        await self._send_json({"type": "audio_flush"})  # le boîtier se tait tout de suite
         self._running.set()  # une lecture en pause doit pouvoir finir
         task.cancel()
         try:
@@ -178,6 +185,8 @@ class Player:
         if not self.playing or not self._running.is_set():
             return False
         self._running.clear()
+        self._rewind_s = max(0.0, self._sent_s - (time.monotonic() - self._t0))
+        await self._send_json({"type": "audio_flush"})  # silence immédiat (sinon ~3 s de réserve)
         await self._send_json({"type": "audio_end"})  # sinon le boîtier jetterait la voix suivante
         if not for_voice:
             await self._send_json({"type": "state", "value": "idle"})
@@ -213,41 +222,49 @@ class Player:
         speaker = SpeakerFilter()
         loop.run_in_executor(None, decode_stream, url, stop, emit)  # s'arrête seul quand stop est posé
         streaming = False  # le boîtier a reçu audio_start (et pas encore audio_end)
-        sent_s = 0.0
-        t0 = 0.0
+        recent: deque[bytes] = deque(maxlen=int((LEAD_S + 2) * RATE * 2 / CHUNK) + 2)  # déjà envoyé
+        self._sent_s, self._t0 = 0.0, 0.0
         # Mesures toutes les STATS_S : avance minimale gardée sur le boîtier (≤ 0 : il a manqué
         # de son), envoi le plus lent (réseau qui freine).
         stats_at, ahead_min, send_max = time.monotonic(), LEAD_S, 0.0
         log("player_start", title=self.title, url=url[:120])
         try:
             while (chunk := await queue.get()) is not None:
+                batch = [chunk]
                 if not self._running.is_set():
-                    streaming = False  # pause : audio_end déjà envoyé
+                    streaming = False  # pause : réserve vidée, audio_end déjà envoyé
                     await self._running.wait()
+                    # Ce que le boîtier n'avait pas joué au moment de la pause repart en premier.
+                    rewind = int(self._rewind_s * RATE) * 2
+                    tail = b"".join(recent)[-rewind:] if rewind else b""
+                    batch = [tail[i:i + CHUNK] for i in range(0, len(tail), CHUNK)] + batch
+                    self._sent_s -= len(tail) / (RATE * 2)
                 if not streaming:
                     streaming = True
-                    t0 = time.monotonic() - sent_s  # le compte reprend où il s'était arrêté
+                    self._t0 = time.monotonic() - self._sent_s  # le compte reprend où il s'était arrêté
                     # audio_end d'abord : un boîtier resté en « j'ignore la fin de la réponse
                     # interrompue » (bouton, pont redémarré) se remet à écouter le son.
                     await self._send_json({"type": "audio_end"})
                     await self._send_json({"type": "state", "value": "speaking"})
                     await self._send_json({"type": "audio_start", "rate": RATE})
-                # Pas plus de LEAD_S secondes d'avance sur ce que le boîtier a joué.
-                ahead = sent_s - (time.monotonic() - t0)
-                if ahead > LEAD_S:
-                    await asyncio.sleep(ahead - LEAD_S)
-                sending = time.monotonic()
-                if not await self._send_pcm(speaker.process(chunk, self.volume / DEVICE_VOLUME)):
-                    break  # plus aucun boîtier connecté
-                send_max = max(send_max, time.monotonic() - sending)
-                sent_s += len(chunk) / (RATE * 2)
-                ahead_min = min(ahead_min, sent_s - (time.monotonic() - t0))
+                for piece in batch:
+                    # Pas plus de LEAD_S secondes d'avance sur ce que le boîtier a joué.
+                    ahead = self._sent_s - (time.monotonic() - self._t0)
+                    if ahead > LEAD_S:
+                        await asyncio.sleep(ahead - LEAD_S)
+                    sending = time.monotonic()
+                    if not await self._send_pcm(speaker.process(piece, self.volume / DEVICE_VOLUME)):
+                        return  # plus aucun boîtier connecté
+                    recent.append(piece)
+                    send_max = max(send_max, time.monotonic() - sending)
+                    self._sent_s += len(piece) / (RATE * 2)
+                    ahead_min = min(ahead_min, self._sent_s - (time.monotonic() - self._t0))
+                    self._played_s = max(0.0, self._sent_s - LEAD_S)
                 if time.monotonic() - stats_at >= STATS_S:
                     log("player_stats", ahead_min_s=round(ahead_min, 2),
                         send_max_ms=round(send_max * 1000), position_s=round(self._played_s))
                     stats_at, ahead_min, send_max = time.monotonic(), LEAD_S, 0.0
-                self._played_s = max(0.0, sent_s - LEAD_S)
-            log("player_end", title=self.title, seconds=round(sent_s))
+            log("player_end", title=self.title, seconds=round(self._sent_s))
         finally:
             stop.set()
             while not queue.empty():  # débloque le fil de décodage s'il attendait

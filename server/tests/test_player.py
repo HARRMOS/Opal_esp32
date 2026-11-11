@@ -47,7 +47,8 @@ def test_pause_resume_and_volume(monkeypatch):
         await asyncio.sleep(0.4)
         loud = np.abs(np.frombuffer(sent["pcm"][-1], dtype="<i2").astype(float)).max()
         assert await p.pause(for_voice=True) and p.paused and p.playing
-        assert sent["json"][-1] == "audio_end"  # le boîtier peut recevoir la voix d'Opal
+        assert sent["json"][-2:] == ["audio_flush", "audio_end"]  # silence tout de suite, voix possible
+        assert 0.1 < p._rewind_s <= 0.2 + 0.05  # la réserve vidée (≈ LEAD_S) sera rejouée
         n = len(sent["pcm"])
         await asyncio.sleep(0.4)
         assert len(sent["pcm"]) <= n + 1  # plus rien ne part pendant la pause

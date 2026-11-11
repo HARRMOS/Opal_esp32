@@ -59,8 +59,15 @@ static bool handsFree = false;
 static bool privateMode = false;
 static bool nightSleep = false;
 static volatile uint32_t spkLastMs = 0;  // dernier son joué
-// Mesures du son reçu, envoyées au pont toutes les STATS_MS pendant une lecture (journaux du VPS).
-static constexpr uint32_t STATS_MS = 5000;
+// Diagnostic du son (« diag »), toutes les STATS_MS pendant une lecture : sur le port USB et envoyé au
+// pont (journaux du VPS). Si ça grésille alors que échantillons/s ≈ cadence, réserve pleine et 0 saturé,
+// le problème n'est pas dans le programme mais dans l'électronique (alimentation, ampli, fils).
+static constexpr uint32_t STATS_MS = 2000;
+static volatile uint32_t statSamples = 0;         // échantillons réellement envoyés à l'ampli
+static volatile uint32_t statPeak = 0;            // crête (sur 32767)
+static volatile uint32_t statClipped = 0;         // échantillons au maximum : écrêtage
+static volatile uint32_t statWaitUs = 0;          // tâche audio en attente de son
+static volatile uint32_t statWriteUs = 0;         // tâche audio en train d'écrire vers l'ampli
 static volatile bool audioStreaming = false;      // entre audio_start et audio_end
 static volatile uint32_t statUnderruns = 0;       // tampon vide en pleine lecture : un clic
 static volatile uint32_t statRxBytes = 0;
@@ -164,7 +171,9 @@ static void speakerTask(void*) {
   uint32_t currentRate = SPK_DEFAULT_RATE;
   for (;;) {
     size_t len = 0;
+    const uint32_t waitStart = micros();
     auto* data = (int16_t*)xRingbufferReceiveUpTo(spkBuffer, &len, pdMS_TO_TICKS(50), 2048);
+    statWaitUs += micros() - waitStart;
     if (!data) {
       if (audioStreaming && !discardAudio && millis() - spkLastMs < 1000) statUnderruns++;
       continue;
@@ -174,8 +183,19 @@ static void speakerTask(void*) {
       spk.configureTX(currentRate, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
     }
     size_t n = len / 2;
-    for (size_t i = 0; i < n; i++) data[i] = (int32_t)data[i] * SPK_VOLUME / 100;
+    uint32_t peak = statPeak, clipped = 0;
+    for (size_t i = 0; i < n; i++) {
+      data[i] = (int32_t)data[i] * SPK_VOLUME / 100;
+      const uint32_t a = data[i] < 0 ? -(int32_t)data[i] : data[i];
+      if (a > peak) peak = a;
+      if (a >= 32700) clipped++;
+    }
+    statPeak = peak;
+    statClipped += clipped;
+    const uint32_t writeStart = micros();
     spk.write((uint8_t*)data, n * 2);
+    statWriteUs += micros() - writeStart;
+    statSamples += n;
     vRingbufferReturnItem(spkBuffer, data);
     spkLastMs = millis();
   }
@@ -275,6 +295,8 @@ static void onText(const uint8_t* payload, size_t length) {
   } else if (strcmp(type, "audio_start") == 0) {
     spkRate = doc["rate"] | SPK_DEFAULT_RATE;
     audioStreaming = true;
+  } else if (strcmp(type, "audio_flush") == 0) {  // pause, arrêt : le son en réserve est jeté tout de suite
+    flushSpeaker();
   } else if (strcmp(type, "audio_end") == 0) {
     discardAudio = false;
     audioStreaming = false;
@@ -538,19 +560,42 @@ static void sendAudioStats() {
   last = millis();
   if (!audioStreaming && !statUnderruns) {
     statRxBytes = 0;
+    statSamples = statPeak = statClipped = statWaitUs = statWriteUs = 0;
     return;
   }
+  const uint32_t buffered = SPK_BUFFER_BYTES - xRingbufferGetCurFreeSize(spkBuffer);
+  const uint32_t samplesPerS = (uint64_t)statSamples * 1000 / elapsed;
+  const uint32_t busy = (statWriteUs / 10) / elapsed;  // % du temps passé à écrire vers l'ampli
+  Serial.printf("diag : %lu échantillons/s (%lu attendus), crête %lu / 32767, saturés %lu, réserve %lu Ko "
+                "(%lu ms, minimum %ld ms), attente %lu ms, écriture %lu ms, audio occupé %lu %%, clics %lu, "
+                "reçu %lu kbit/s, WiFi %d dBm, CPU %lu MHz\n",
+                (unsigned long)samplesPerS, (unsigned long)spkRate, (unsigned long)statPeak,
+                (unsigned long)statClipped, (unsigned long)(buffered / 1024),
+                (unsigned long)(buffered * 1000 / (spkRate * 2)),
+                statMinBufferedMs == UINT32_MAX ? -1L : (long)statMinBufferedMs,
+                (unsigned long)(statWaitUs / 1000), (unsigned long)(statWriteUs / 1000), (unsigned long)busy,
+                (unsigned long)statUnderruns, (unsigned long)(statRxBytes * 8 / elapsed), WiFi.RSSI(),
+                (unsigned long)getCpuFrequencyMhz());
   JsonDocument doc;
   doc["type"] = "stats";
+  doc["samples_s"] = samplesPerS;
+  doc["rate"] = spkRate;
+  doc["peak"] = statPeak;
+  doc["clipped"] = statClipped;
+  doc["reserve_ms"] = buffered * 1000 / (spkRate * 2);
+  doc["buffer_min_ms"] = statMinBufferedMs == UINT32_MAX ? -1 : (int)statMinBufferedMs;
+  doc["wait_ms"] = statWaitUs / 1000;
+  doc["write_ms"] = statWriteUs / 1000;
+  doc["busy_pct"] = busy;
   doc["underruns"] = statUnderruns;
   doc["rx_kbps"] = statRxBytes * 8 / elapsed;
-  doc["buffer_min_ms"] = statMinBufferedMs == UINT32_MAX ? -1 : (int)statMinBufferedMs;
-  doc["rate"] = spkRate;
   doc["rssi"] = WiFi.RSSI();
+  doc["cpu_mhz"] = getCpuFrequencyMhz();
   doc["heap_kb"] = ESP.getFreeHeap() / 1024;
   statUnderruns = 0;
   statRxBytes = 0;
   statMinBufferedMs = UINT32_MAX;
+  statSamples = statPeak = statClipped = statWaitUs = statWriteUs = 0;
   String out;
   serializeJson(doc, out);
   ws.sendTXT(out);
