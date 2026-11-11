@@ -1,6 +1,7 @@
 #include "head.h"
 
 #include <Arduino.h>
+#include <Preferences.h>
 
 #include "config.h"
 
@@ -23,6 +24,7 @@ constexpr Feel GESTURE = {16.0f, 3.5f, 30.f}; // « non », « oui », balanceme
 
 constexpr float DEADBAND = 0.04f;    // variation de cible ignorée (tremblement du visage)
 constexpr float TARGET_SMOOTH = 6.f; // lissage de la cible entre deux images de la caméra
+constexpr float US_PER_DEG = 11.1f;  // MG90S : ~1000 µs pour 90°
 
 // Un servo : sa broche, son réglage et son état de mouvement.
 struct Axis {
@@ -35,10 +37,13 @@ struct Axis {
   float base = 0;           // position lissée vers laquelle on va
   bool attached = false;
   uint32_t stillSince = 0;
+  float restDeg = 0;        // position de repos (degrés, sens « humain » : droite / haut)
+  int restSign = 1;         // pan : + droite = + position ; tilt : + haut = − position (y vers le bas)
 
   void write(float p) {
-    if (invert) p = -p;
-    const float us = centerUs + constrain(p, -1.f, 1.f) * rangeUs;
+    float us = constrain(p, -1.f, 1.f) * rangeUs + restSign * restDeg * US_PER_DEG;
+    if (invert) us = -us;
+    us += centerUs;
     if (!attached) {
       ledcAttach(pin, PWM_HZ, PWM_BITS);
       attached = true;
@@ -77,6 +82,15 @@ struct Axis {
 Axis pan{HEAD_PAN_PIN, HEAD_PAN_CENTER_US, HEAD_PAN_RANGE_US, HEAD_PAN_INVERT, false};
 Axis tilt{HEAD_TILT_PIN, HEAD_TILT_CENTER_US, HEAD_TILT_RANGE_US, HEAD_TILT_INVERT, true};
 
+void loadRest() {
+  Preferences prefs;
+  prefs.begin("head", true);
+  pan.restDeg = prefs.getFloat("pan", 0);
+  tilt.restDeg = prefs.getFloat("tilt", 0);
+  prefs.end();
+  tilt.restSign = -1;
+}
+
 // Petits mouvements enchaînés autour de la position de base (gestes), sur un axe.
 struct Key {
   float offset;
@@ -106,6 +120,7 @@ float randRange(float a, float b) { return a + (b - a) * (esp_random() / 4294967
 }  // namespace
 
 void begin() {
+  loadRest();
   const uint32_t now = millis();
   for (Axis* a : {&pan, &tilt}) {
     a->pos = a->vel = a->wanted = a->base = 0;
@@ -115,6 +130,24 @@ void begin() {
   lastMs = now;
   nextGlance = now + 8000;
 }
+
+void setRest(float panDeg, float tiltDeg) {
+  pan.restDeg = constrain(panDeg, -REST_MAX_DEG, REST_MAX_DEG);
+  tilt.restDeg = constrain(tiltDeg, -REST_MAX_DEG, REST_MAX_DEG);
+  Preferences prefs;
+  prefs.begin("head", false);
+  prefs.putFloat("pan", pan.restDeg);
+  prefs.putFloat("tilt", tilt.restDeg);
+  prefs.end();
+  const uint32_t now = millis();
+  for (Axis* a : {&pan, &tilt}) {  // la tête rejoint tout de suite la nouvelle position
+    a->write(a->pos);
+    a->stillSince = now;
+  }
+}
+
+float restPan() { return pan.restDeg; }
+float restTilt() { return tilt.restDeg; }
 
 void lookAt(float x) {
   pan.setWanted(x);

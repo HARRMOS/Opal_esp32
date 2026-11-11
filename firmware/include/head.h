@@ -14,6 +14,13 @@ void lookAt(float x, float y);  // direction et inclinaison
 void center();
 void setIdle(bool idle);  // personne à suivre : coups d'œil lents de temps en temps
 
+// Position de repos, réglée depuis Opal (page Réglages) et retenue même débranché.
+// Degrés : pan + = vers la droite (vue de face), tilt + = plus haut. Bornée à ±REST_MAX_DEG.
+constexpr float REST_MAX_DEG = 20.f;
+void setRest(float panDeg, float tiltDeg);
+float restPan();
+float restTilt();
+
 void shake();   // « non »
 void nod();     // « oui »
 void wiggle();  // petit balancement content

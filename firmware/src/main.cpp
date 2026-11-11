@@ -189,7 +189,10 @@ static void sendJson(const char* type) {
   if (strcmp(type, "hello") == 0) {
     doc["device"] = "opal";
     doc["mic_rate"] = MIC_RATE;
-    doc["fw"] = "0.1.0";
+    doc["fw"] = "0.2.0";
+    JsonObject rest = doc["head_rest"].to<JsonObject>();  // position de repos retenue par le robot
+    rest["pan"] = head::restPan();
+    rest["tilt"] = head::restTilt();
   }
   String out;
   serializeJson(doc, out);
@@ -290,6 +293,11 @@ static void onText(const uint8_t* payload, size_t length) {
     else if (look.is<const char*>()) {
       if (strcmp(look.as<const char*>(), "center") == 0) head::center();
       else head::setIdle(true);
+    }
+    JsonVariant rest = doc["rest"];  // {"pan": degrés, "tilt": degrés} : nouvelle position de repos
+    if (rest.is<JsonObject>()) {
+      head::setRest(rest["pan"] | head::restPan(), rest["tilt"] | head::restTilt());
+      head::center();
     }
   } else if (strcmp(type, "scene") == 0) {  // animation plein écran
     applySceneCommand(doc);

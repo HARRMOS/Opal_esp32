@@ -47,7 +47,7 @@
 #define HEAD_PAN_RANGE_US 550     // course de chaque côté (~50°) ; réduire si le servo force
 #define HEAD_PAN_INVERT false     // la tête tourne du mauvais côté ? passer à true
 #define HEAD_TILT_PIN 39
-#define HEAD_TILT_CENTER_US 1500  // impulsion « tête droite » (au montage du palonnier)
+#define HEAD_TILT_CENTER_US 1500  // milieu du servo ; la position de repos se règle dans Opal (Réglages → Robot)
 #define HEAD_TILT_RANGE_US 270    // ±25° : butée mécanique du cou, ne pas dépasser
 #define HEAD_TILT_INVERT false    // la tête lève quand elle devrait baisser ? passer à true
 #define HEAD_FOLLOW 0.8f          // part du regard prise par la tête (le reste : les yeux)
@@ -61,7 +61,7 @@
 #define MAX_RECORD_MS 20000
 
 #define SPK_DEFAULT_RATE 24000
-#define SPK_VOLUME 70             // 0-100
+#define SPK_VOLUME 100            // 0-100 (le pont règle le volume et limite les crêtes)
 #define SPK_BUFFER_BYTES (2 * 1024 * 1024)  // ~43 s à 24 kHz, en PSRAM
 
 // ---------------------------------------------------------------------------
