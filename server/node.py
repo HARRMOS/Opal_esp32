@@ -267,8 +267,28 @@ PLAY_TOOL = {
     },
 }
 
+REST_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "opal_box_repos",
+        "description": (
+            "Position de repos de la tête d'Opal Box (où elle regarde quand rien ne l'occupe), "
+            "retenue même débranchée. Sans argument : la position actuelle. Exemple : la tête "
+            "regarde trop vers le bas → hauteur plus grande."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "hauteur": {"type": "number", "description": "Degrés, + = plus haut (-20 à 20)."},
+                "gauche_droite": {"type": "number",
+                                  "description": "Degrés, + = vers la droite vue de face (-20 à 20)."},
+            },
+        },
+    },
+}
+
 TOOLS = [EYES_TOOL, PHOTO_TOOL, PRESENCE_TOOL, LEARN_FACE_TOOL, FORGET_FACE_TOOL, HEAD_TOOL,
-         SCREEN_TOOL, LOCK_TOOL, LISTEN_TOOL, PLAY_TOOL]
+         SCREEN_TOOL, LOCK_TOOL, LISTEN_TOOL, PLAY_TOOL, REST_TOOL]
 
 ENVIRONMENT = (
     "## OPAL BOX\n"

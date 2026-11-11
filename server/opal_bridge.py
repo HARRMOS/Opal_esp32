@@ -97,6 +97,7 @@ from web import make_app
 MAX_UTTERANCE_S = 20
 MIN_UTTERANCE_S = 0.3
 AUDIO_CHUNK = 4096  # octets par trame binaire envoyée à l'ESP32
+REST_MAX_DEG = 20.0  # position de repos de la tête : même borne que le firmware (head.h)
 IRIS_TIMEOUT_S = 180
 LONG_ANSWER = "C'est long, je continue en arrière-plan et je te tiens au courant."
 UNREACHABLE_ANSWER = "Je n'arrive pas à joindre mon cerveau pour l'instant."
@@ -326,6 +327,7 @@ class OpalBridge:
         # Sourate (ou autre MP3) jouée sur le haut-parleur ; on n'écoute pas pendant la lecture.
         self.player = Player(self.send_to_devices, self._send_audio, self._update_listening)
         self._music_held = False  # sourate mise en pause pour la voix : elle reprend après
+        self.head_rest: dict[str, float] | None = None  # position de repos annoncée par le boîtier
 
     def set_pending_confirmation(self, confirm_id: str | None) -> None:
         self.pending_confirmation = confirm_id
@@ -402,6 +404,8 @@ class OpalBridge:
                 return False, "Indique une direction ou un geste."
             sent = await self.send_to_devices(cmd)
             return (True, "Tête : c'est fait.") if sent else (False, "Opal Box n'est pas connectée.")
+        if tool == "opal_box_repos":
+            return await self._rest_tool(args)
         if tool == "opal_box_ecran":
             return await self._screen_tool(args)
         if tool == "opal_box_lecture":
@@ -464,6 +468,26 @@ class OpalBridge:
         else:
             return False, f"Action inconnue : {action}.", {}
         return True, text, player.status()
+
+    async def _rest_tool(self, args: dict[str, object]) -> tuple[bool, str, dict[str, object]]:
+        """Outil opal_box_repos : position de repos de la tête (degrés), retenue par le boîtier."""
+        if not self._devices:
+            return False, "Opal Box n'est pas connectée.", {}
+        if self.head_rest is None:
+            return False, "Le programme du robot est trop ancien pour régler la position de repos.", {}
+        rest = dict(self.head_rest)
+        changed = False
+        for key, name in (("tilt", "hauteur"), ("pan", "gauche_droite")):
+            if args.get(name) is not None:
+                rest[key] = max(-REST_MAX_DEG, min(REST_MAX_DEG, round(float(str(args[name])), 1)))
+                changed = True
+        if changed:
+            await self.send_to_devices({"type": "head", "rest": rest})
+            self.head_rest = rest
+        text = (f"Tête au repos : {rest['tilt']:+g}° en hauteur, {rest['pan']:+g}° gauche-droite"
+                f"{' (réglé)' if changed else ''}.")
+        return True, text, {"hauteur": rest["tilt"], "gauche_droite": rest["pan"],
+                            "max": REST_MAX_DEG}
 
     async def _screen_tool(self, args: dict[str, object]) -> tuple[bool, str]:
         """Outil opal_box_ecran : animation plein écran et/ou style des yeux."""
@@ -939,6 +963,8 @@ class OpalBridge:
             if hello.get("device") == "camera":
                 await self._handle_camera(ws, hello)
             else:
+                if isinstance(rest := hello.get("head_rest"), dict):
+                    self.head_rest = {"pan": float(rest.get("pan", 0)), "tilt": float(rest.get("tilt", 0))}
                 await self._handle_box(ws)
         except websockets.ConnectionClosed:
             pass

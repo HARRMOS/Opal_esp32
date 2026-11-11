@@ -26,7 +26,7 @@ RATE = int(os.environ.get("OPAL_AUDIO_RATE", "48000"))
 CHUNK = 4096        # octets par trame (comme la voix)
 LEAD_S = 3.0        # avance maximale du boîtier sur la lecture
 QUEUE_CHUNKS = 64   # ~5 s décodées d'avance côté pont
-DEVICE_VOLUME = 70  # volume fixe du boîtier (SPK_VOLUME du firmware)
+DEVICE_VOLUME = 70  # volume pour lequel le son passe tel quel (le reste : gain du pont)
 
 
 class SpeakerFilter:
