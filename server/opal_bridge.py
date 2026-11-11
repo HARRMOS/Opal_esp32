@@ -456,6 +456,11 @@ class OpalBridge:
             text = "En pause." if await player.pause() else "Rien à mettre en pause."
         elif action == "reprendre":
             text = "Ça reprend." if await player.resume() else "Rien n'était en pause."
+        elif action == "basculer":  # bouton ⏯ de l'écran : le robot sait s'il est en pause
+            if player.paused:
+                text = "Ça reprend." if await player.resume() else "Rien n'était en pause."
+            else:
+                text = "En pause." if await player.pause() else "Rien en lecture."
         elif action == "volume":
             if args.get("volume") is not None:
                 player.set_volume(int(float(str(args["volume"]))))
@@ -1181,6 +1186,8 @@ class OpalBridge:
             feeder.cancel()
         if sent:
             await self._send(ws, type="audio_end")
+        if self._music_held:  # toute prise de parole d'Opal (réponse, accueil, rappel…)
+            asyncio.create_task(self._release_music())
         return sent / (TTS_RATE * 2)
 
     async def _hold_music(self) -> None:

@@ -257,7 +257,8 @@ PLAY_TOOL = {
             "type": "object",
             "properties": {
                 "action": {"type": "string",
-                           "enum": ["jouer", "pause", "reprendre", "volume", "stop", "etat"]},
+                           "enum": ["jouer", "pause", "reprendre", "basculer", "volume", "stop",
+                                    "etat"]},
                 "volume": {"type": "integer", "description": "Volume en % (0 à 100)."},
                 "ecart": {"type": "integer", "description": "Variation du volume, ex. 10 ou -10."},
                 "url": {"type": "string", "description": "Adresse https du MP3 (pour jouer)."},
