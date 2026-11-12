@@ -55,17 +55,27 @@ class Transcriber:
 
 
 class Speaker:
-    """Texte → PCM 16 bits mono (TTS_RATE), avec la voix Edge d'Opal."""
+    """Texte → PCM 16 bits mono (TTS_RATE).
+
+    La voix d'Opal vient du cerveau (Google Chirp 3 HD, mots arabes prononcés en arabe) ; s'il ne
+    répond pas, la voix Edge (Gérard) prend le relais."""
 
     def __init__(self) -> None:
-        self._voice = os.environ.get("OPAL_TTS_VOICE", "fr-FR-RemyMultilingualNeural")
-        self._rate = os.environ.get("OPAL_TTS_RATE", "-10%")
-        self._pitch = os.environ.get("OPAL_TTS_PITCH", "+0Hz")
+        self._voice = os.environ.get("OPAL_TTS_VOICE", "fr-BE-GerardNeural")
+        self._rate = os.environ.get("OPAL_TTS_RATE", "-6%")
+        self._pitch = os.environ.get("OPAL_TTS_PITCH", "-6Hz")
+        self.remote = None  # async (texte) -> PCM : la voix du cerveau (posée au démarrage)
 
     async def synthesize(self, text: str) -> bytes:
         text = text.strip()
         if not text:
             return b""
+        if self.remote is not None:
+            try:
+                if pcm := await self.remote(text):
+                    return pcm
+            except Exception as exc:
+                log("tts_remote_failed", error=str(exc)[:160])
         mp3 = bytearray()
         tts = edge_tts.Communicate(text, self._voice, rate=self._rate, pitch=self._pitch)
         async for chunk in tts.stream():

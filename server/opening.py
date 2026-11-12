@@ -7,7 +7,8 @@ découpage des phrases par le volume) :
   presence   dès que quelqu'un est devant la caméra
   connu      dès qu'un visage CONNU est devant la caméra
   regard     un visage connu qui regarde Opal (ou s'il n'y a aucun visage enregistré, n'importe qui)
-  mot        quand on dit « Opal » (mot de réveil, voir wake.py)
+  mot        quand on dit « Opal » (mot de réveil, voir wake.py) : le micro reste ouvert, mais une
+             phrase n'est prise que si elle commence par « Opal » (ou suit de près une réponse)
 
 Après une réponse, l'écoute reste ouverte FOLLOW_S secondes pour enchaîner sans rouvrir
 (sauf en mode bouton). Pendant qu'Opal réfléchit ou parle, on n'écoute pas (sa propre voix).
@@ -16,10 +17,13 @@ Mode privé : rien n'est écouté ni analysé ; seul le bouton reste possible.
 
 from __future__ import annotations
 
+import json
 import math
+import os
 import struct
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 
 MODES = ("bouton", "presence", "connu", "regard", "mot")
 MODE_TEXT = {
@@ -43,8 +47,14 @@ class Inputs:
 
 
 class Opening:
-    def __init__(self, mode: str = "regard") -> None:
-        self.mode = mode if mode in MODES else "regard"
+    def __init__(self, mode: str = "regard", path: Path | None = None) -> None:
+        # Le mode choisi (à la voix) est retenu : il survit au redémarrage du pont.
+        self._path = path if path is not None else Path(os.environ.get("OPAL_OPENING_FILE", "/models/opening.json"))
+        try:
+            saved = json.loads(self._path.read_text(encoding="utf-8")).get("mode")
+        except (OSError, ValueError):
+            saved = None
+        self.mode = saved if saved in MODES else mode if mode in MODES else "regard"
         self.private = False
         self._opened_until = 0.0
         self._follow_until = 0.0
@@ -54,7 +64,16 @@ class Opening:
             return False
         self.mode = mode
         self._opened_until = 0.0
+        try:
+            self._path.write_text(json.dumps({"mode": mode}), encoding="utf-8")
+        except OSError:
+            pass
         return True
+
+    def needs_wake(self, now: float) -> bool:
+        """Mode « mot » hors des moments ouverts (juste après « Opal » ou une réponse) : la phrase
+        doit commencer par « Opal »."""
+        return self.mode == "mot" and now >= self._opened_until and now >= self._follow_until
 
     def wake_word(self, now: float) -> None:
         self._opened_until = max(self._opened_until, now + HOLD_S)
@@ -79,7 +98,7 @@ class Opening:
         if now < self._follow_until and s.present:
             return True, "suite"
         if self.mode == "mot":
-            return (now < self._opened_until), "mot"
+            return True, "guette"  # micro ouvert ; le mot « Opal » trie les phrases (wake.py)
         if not s.present:
             return False, "personne"
         known = bool(s.identity) or not s.knows_faces

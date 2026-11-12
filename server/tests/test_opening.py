@@ -59,13 +59,34 @@ def test_follow_up_after_reply() -> None:
     assert not o.is_open(s, 100 + FOLLOW_S + 0.5)[0]
 
 
-def test_wake_word_mode() -> None:
-    o = Opening("mot")
-    assert not o.is_open(Inputs(present=True), 0)[0]
+def test_wake_word_mode(tmp_path: Path) -> None:
+    o = Opening("mot", tmp_path / "opening.json")
+    # Le micro reste ouvert (sauf Opal occupée) ; c'est le mot « Opal » qui trie les phrases.
+    assert o.is_open(Inputs(present=False), 0)[0]
+    assert not o.is_open(Inputs(present=True, busy=True), 0)[0]
+    assert o.needs_wake(0)
     o.wake_word(5)
-    assert o.is_open(Inputs(present=False), 6)[0]
-    assert not o.is_open(Inputs(present=False), 5 + HOLD_S + 0.1)[0]
+    assert not o.needs_wake(6)                    # juste après « Opal » : la demande suit
+    assert o.needs_wake(5 + HOLD_S + 0.1)
+    o.replied(20)
+    assert not o.needs_wake(21) and o.needs_wake(20 + FOLLOW_S + 0.1)  # on enchaîne sans le redire
     assert not o.set_mode("nimporte")
+
+
+def test_mode_is_remembered(tmp_path: Path) -> None:
+    path = tmp_path / "opening.json"
+    Opening("regard", path).set_mode("mot")
+    assert Opening("regard", path).mode == "mot"
+
+
+def test_wake_word_variants() -> None:
+    from wake import split_wake
+
+    assert split_wake("Opal, quelle heure est-il ?") == (True, "quelle heure est-il ?")
+    assert split_wake("Au pal mets la sourate Al-Mulk") == (True, "mets la sourate Al-Mulk")
+    assert split_wake("Hey Opale !") == (True, "")
+    for other in ("On parle de toi", "Opa c'est fini", "Hôpital demain", "Opel Corsa", "Pal"):
+        assert not split_wake(other)[0]
 
 
 def _tone(ms: int, amp: int, rate: int = 16000) -> bytes:

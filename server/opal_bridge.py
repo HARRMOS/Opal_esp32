@@ -90,6 +90,7 @@ from logs import log
 from node import SCENES, OpalNode, eyes_command
 from opening import MODE_TEXT, Endpointer, Inputs, Opening
 from player import Player
+from wake import HEAD_S, split_wake
 from speech import SpeechFeed, speech_script
 from voice import MIC_RATE, TTS_RATE, Speaker, Transcriber
 from web import make_app
@@ -197,6 +198,14 @@ class IrisClient:
         response.raise_for_status()
         body = response.json()
         return bool((body.get("run") or {}).get("ok")), str(body.get("summary") or "")
+
+    async def tts(self, text: str) -> bytes:
+        """Voix d'Opal fabriquée par le cerveau (Google Chirp 3 HD), en PCM à TTS_RATE."""
+        response = await self._client.post(
+            "/api/tts", json={"text": text, "format": "pcm", "rate": TTS_RATE}, timeout=15
+        )
+        response.raise_for_status()
+        return response.content
 
     async def ask(self, text: str) -> str:
         response = await self._client.post(
@@ -1019,8 +1028,11 @@ class OpalBridge:
                             audio.extend(message)
                     elif self._listening and not self._busy:
                         if (phrase := ep.feed(message)) is not None:
-                            self.opening.heard(time.monotonic())
-                            asyncio.create_task(self._handle_utterance(ws, phrase, handsfree=True))
+                            wake = self.opening.needs_wake(time.monotonic())
+                            if not wake:
+                                self.opening.heard(time.monotonic())
+                            asyncio.create_task(self._handle_utterance(ws, phrase, handsfree=True,
+                                                                       wake=wake))
                     else:
                         ep.reset()  # micro de fin d'écoute ou voix d'Opal : on jette
                     continue
@@ -1044,7 +1056,8 @@ class OpalBridge:
             self._devices.discard(ws)
             self._update_node()
 
-    async def _handle_utterance(self, ws: ServerConnection, pcm: bytes, handsfree: bool = False) -> None:
+    async def _handle_utterance(self, ws: ServerConnection, pcm: bytes, handsfree: bool = False,
+                                wake: bool = False) -> None:
         if len(pcm) < MIN_UTTERANCE_S * MIC_RATE * 2:
             await self._send(ws, type="state", value="idle")
             asyncio.create_task(self._release_music())
@@ -1058,28 +1071,54 @@ class OpalBridge:
                     break
         self._busy = True
         await self._update_listening()
+        answered = False
         try:
-            await self._answer(ws, pcm, handsfree)
+            answered = await self._answer(ws, pcm, handsfree, wake)
         finally:
             self._busy = False
-            self.opening.replied(time.monotonic())
+            if answered:  # une phrase sans « Opal » n'ouvre pas la conversation
+                self.opening.replied(time.monotonic())
             await self._send(ws, type="state", value="idle")
             asyncio.create_task(self._release_music())
 
-    async def _answer(self, ws: ServerConnection, pcm: bytes, handsfree: bool) -> None:
+    async def _answer(self, ws: ServerConnection, pcm: bytes, handsfree: bool, wake: bool = False) -> bool:
+        """Transcrit et répond ; False si la phrase est ignorée (rien compris, ou pas de « Opal »)."""
+        head_text = ""
+        if wake:
+            # Mot de réveil : seules les premières secondes sont transcrites pour le chercher ;
+            # une phrase sans « Opal » n'est ni traitée ni journalisée.
+            try:
+                head_text = await self._stt.transcribe(pcm[: int(HEAD_S * MIC_RATE * 2)])
+            except Exception as exc:
+                log("stt_failed", error=str(exc))
+                return False
+            if not split_wake(head_text)[0]:
+                log("wake_ignored", seconds=round(len(pcm) / (MIC_RATE * 2), 1))
+                return False
+            self.opening.wake_word(time.monotonic())
+            log("wake_word")
+            await self._send(ws, type="eyes", mood="happy", look=[0, 0], blink=True, hold_ms=1500)
         await self._send(ws, type="state", value="thinking")
         text = ""
         try:
-            text = await self._stt.transcribe(pcm)
+            short = wake and len(pcm) <= HEAD_S * MIC_RATE * 2
+            text = head_text if short else await self._stt.transcribe(pcm)
         except Exception as exc:
             log("stt_failed", error=str(exc))
+        if wake:
+            said, rest = split_wake(text)
+            text = rest if said else text
+            if not text.strip():  # « Opal » seul : on attend la demande
+                await self._speak(ws, "Oui ?")
+                await self._playback_done()
+                return True
         if handsfree and text and _PHANTOM.search(text):
             log("transcript_phantom", text=text)
             text = ""
         if not text:
             if not handsfree:
                 await self._send(ws, type="error", message="Je n'ai rien compris.")
-            return
+            return False
 
         await self._send(ws, type="transcript", text=text)
         log("transcript", text=text, handsfree=handsfree)
@@ -1098,6 +1137,7 @@ class OpalBridge:
         # La voix est envoyée plus vite qu'elle n'est jouée : on attend la fin de la lecture
         # avant de rouvrir l'écoute, sinon le micro entend Opal.
         await self._playback_done()
+        return True
 
     async def _reply(self, ws: ServerConnection, text: str) -> str:
         """Demande à Opal et dit sa réponse au fil de la génération ; retourne le texte final."""
@@ -1236,7 +1276,9 @@ async def run(host: str, port: int, device_token: str) -> None:
     iris_url = os.environ.get("IRIS_URL", "http://iris:8765")
     iris = IrisClient(iris_url, iris_token())
     stt = Transcriber()
-    bridge = OpalBridge(iris, stt, Speaker(), device_token)
+    speaker = Speaker()
+    speaker.remote = iris.tts
+    bridge = OpalBridge(iris, stt, speaker, device_token)
     activity = OpalActivity(
         iris_url.replace("http", "ws", 1).rstrip("/") + "/ws",
         iris_token(),
