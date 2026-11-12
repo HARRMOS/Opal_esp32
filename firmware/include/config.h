@@ -49,7 +49,7 @@
 #define HEAD_TILT_PIN 39
 #define HEAD_TILT_CENTER_US 1500  // milieu du servo ; la position de repos se règle dans Opal (Réglages → Robot)
 #define HEAD_TILT_RANGE_US 270    // ±25° : butée mécanique du cou, ne pas dépasser
-#define HEAD_TILT_INVERT false    // la tête lève quand elle devrait baisser ? passer à true
+#define HEAD_TILT_INVERT true     // servo du cou monté à l'envers (vérifié sur le robot le 12/11)
 #define HEAD_FOLLOW 0.8f          // part du regard prise par la tête (le reste : les yeux)
 
 // ---------------------------------------------------------------------------

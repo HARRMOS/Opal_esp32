@@ -280,9 +280,9 @@ REST_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "hauteur": {"type": "number", "description": "Degrés, + = plus haut (-20 à 20)."},
+                "hauteur": {"type": "number", "description": "Degrés, + = plus haut (-35 à 35)."},
                 "gauche_droite": {"type": "number",
-                                  "description": "Degrés, + = vers la droite vue de face (-20 à 20)."},
+                                  "description": "Degrés, + = vers la droite vue de face (-35 à 35)."},
             },
         },
     },

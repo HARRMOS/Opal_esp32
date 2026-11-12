@@ -84,9 +84,16 @@ Axis tilt{HEAD_TILT_PIN, HEAD_TILT_CENTER_US, HEAD_TILT_RANGE_US, HEAD_TILT_INVE
 
 void loadRest() {
   Preferences prefs;
-  prefs.begin("head", true);
+  prefs.begin("head", false);
   pan.restDeg = prefs.getFloat("pan", 0);
   tilt.restDeg = prefs.getFloat("tilt", 0);
+  // Version 2 : le sens du servo du cou a été corrigé (HEAD_TILT_INVERT) ; une hauteur réglée avant
+  // l'était à l'envers, on la retourne une fois pour que la tête ne bouge pas.
+  if (prefs.getUChar("v", 1) < 2) {
+    tilt.restDeg = -tilt.restDeg;
+    prefs.putFloat("tilt", tilt.restDeg);
+    prefs.putUChar("v", 2);
+  }
   prefs.end();
   tilt.restSign = -1;
 }

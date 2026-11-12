@@ -97,7 +97,7 @@ from web import make_app
 MAX_UTTERANCE_S = 20
 MIN_UTTERANCE_S = 0.3
 AUDIO_CHUNK = 4096  # octets par trame binaire envoyée à l'ESP32
-REST_MAX_DEG = 20.0  # position de repos de la tête : même borne que le firmware (head.h)
+REST_MAX_DEG = 35.0  # position de repos de la tête : même borne que le firmware (head.h)
 IRIS_TIMEOUT_S = 180
 LONG_ANSWER = "C'est long, je continue en arrière-plan et je te tiens au courant."
 UNREACHABLE_ANSWER = "Je n'arrive pas à joindre mon cerveau pour l'instant."
