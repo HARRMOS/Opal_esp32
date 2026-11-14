@@ -87,7 +87,14 @@ from initiative import SPOKEN, Initiative, Scene, duration, is_silent
 from camera import CameraHub
 from rhythm import DayRhythm
 from logs import log
-from node import SCENES, OpalNode, eyes_command
+from node import (
+    GUARD_ENVIRONMENT,
+    GUARD_NODE_NAME,
+    GUARD_TOOLS,
+    SCENES,
+    OpalNode,
+    eyes_command,
+)
 from opening import MODE_TEXT, Endpointer, Inputs, Opening
 from player import Player
 from wake import HEAD_S, split_wake
@@ -299,6 +306,7 @@ class OpalBridge:
         self.cams.on_expression = self._on_expression
         self.cams.on_eye_contact = self._on_eye_contact
         self.node: OpalNode | None = None
+        self.guard_node: OpalNode | None = None  # verrouillage des PC, toujours en ligne
         self._node_stop: asyncio.TimerHandle | None = None
         self._last_gaze = 0.0
         self._last_greeting = 0.0
@@ -1292,6 +1300,12 @@ async def run(host: str, port: int, device_token: str) -> None:
     if node_token := iris_node_token():
         node_url = iris_url.replace("http", "ws", 1).rstrip("/") + "/node"
         bridge.node = OpalNode(node_url, node_token, bridge.handle_tool)
+        # Toujours connecté : verrouiller les PC ne demande pas que le boîtier soit allumé.
+        bridge.guard_node = OpalNode(
+            node_url, node_token, bridge.handle_tool,
+            name=GUARD_NODE_NAME, tools=GUARD_TOOLS, environment=GUARD_ENVIRONMENT,
+        )
+        bridge.guard_node.start()
     else:
         log("node_disabled", reason="IRIS_NODE_TOKEN absent : pas d'outils Opal Box pour Opal")
     await stt.warm_up()

@@ -289,7 +289,17 @@ REST_TOOL = {
 }
 
 TOOLS = [EYES_TOOL, PHOTO_TOOL, PRESENCE_TOOL, LEARN_FACE_TOOL, FORGET_FACE_TOOL, HEAD_TOOL,
-         SCREEN_TOOL, LOCK_TOOL, LISTEN_TOOL, PLAY_TOOL, REST_TOOL]
+         SCREEN_TOOL, LISTEN_TOOL, PLAY_TOOL, REST_TOOL]
+
+# Le verrouillage des PC ne dépend pas du boîtier : il vit sur son propre nœud, toujours
+# connecté, pour qu'« verrouille mon PC » marche même quand Opal Box est éteinte.
+GUARD_NODE_NAME = "opal-garde"
+GUARD_TOOLS = [LOCK_TOOL]
+GUARD_ENVIRONMENT = (
+    "## OPAL GARDE\n"
+    "« opal-garde » n'est pas un ordinateur : c'est le service qui verrouille les PC du "
+    "propriétaire (opal_box_verrouiller), même quand Opal Box est éteinte."
+)
 
 ENVIRONMENT = (
     "## OPAL BOX\n"
@@ -336,9 +346,21 @@ ToolHandler = Callable[[str, dict[str, Any]], Awaitable[tuple[Any, ...]]]
 
 
 class OpalNode:
-    """Liaison nœud vers Opal, active seulement quand un appareil est en ligne."""
+    """Liaison nœud vers Opal (celle du boîtier n'est active que quand un appareil est en ligne)."""
 
-    def __init__(self, url: str, token: str, handler: ToolHandler) -> None:
+    def __init__(
+        self,
+        url: str,
+        token: str,
+        handler: ToolHandler,
+        *,
+        name: str = NODE_NAME,
+        tools: list[dict[str, Any]] | None = None,
+        environment: str = ENVIRONMENT,
+    ) -> None:
+        self._name = name
+        self._tools = TOOLS if tools is None else tools
+        self._environment = environment
         self._url = url
         self._token = token
         self._handler = handler
@@ -375,10 +397,10 @@ class OpalNode:
                         json.dumps(
                             {
                                 "type": "hello",
-                                "name": NODE_NAME,
+                                "name": self._name,
                                 "platform": "esp32",
-                                "tools": TOOLS,
-                                "environment": ENVIRONMENT,
+                                "tools": self._tools,
+                                "environment": self._environment,
                             },
                             ensure_ascii=False,
                         )
